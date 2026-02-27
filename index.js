@@ -93,6 +93,12 @@ function detectLangFromTelegram(languageCode) {
   return ruLike.some((p) => lc.startsWith(p)) ? "ru" : "en";
 }
 
+function looksCyrillicOrArmenian(text) {
+  if (!text) return false;
+  // Cyrillic: \u0400-\u04FF, Armenian: \u0530-\u058F
+  return /[\u0400-\u04FF\u0530-\u058F]/.test(text);
+}
+
 const I18N = {
   ru: {
     balanceFull: (c, premLine) => `🎟️ Кредиты: ${c.total} (месячные: ${c.monthly}, купленные: ${c.purchased})\n${premLine}`,
@@ -178,7 +184,57 @@ bot.getMe().then((me) => {
   BOT_USERNAME = me.username;
   BOT_ID = me.id;
   console.log("Bot info:", BOT_USERNAME, BOT_ID);
+  // Keep Telegram command menu in sync (RU/EN)
+  setupBotCommands().catch((e) => console.log("setMyCommands error:", e?.message || e));
 });
+
+async function setupBotCommands() {
+  // IMPORTANT: Telegram command menu does NOT support spaces in a command name.
+  // So we use /scan with an argument: /scan text
+  const ru = [
+    { command: "start", description: "Запуск / помощь" },
+    { command: "buy", description: "Магазин (Stars)" },
+    { command: "balance", description: "Баланс кредитов и премиума" },
+    { command: "length", description: "Длина ответов" },
+    { command: "scan", description: "Скан фото: /scan или /scan text" },
+    { command: "image", description: "Сгенерировать картинку" },
+    { command: "video", description: "Сгенерировать видео" },
+    { command: "personality", description: "Выбор личности" },
+    { command: "custom", description: "Кастомная личность" },
+    { command: "text", description: "Ответы текстом" },
+    { command: "voice", description: "Ответы голосом" },
+  ];
+
+  const en = [
+    { command: "start", description: "Start / help" },
+    { command: "buy", description: "Store (Stars)" },
+    { command: "balance", description: "Credits & premium balance" },
+    { command: "length", description: "Response length" },
+    { command: "scan", description: "Scan photo: /scan or /scan text" },
+    { command: "image", description: "Generate an image" },
+    { command: "video", description: "Generate a video" },
+    { command: "personality", description: "Choose personality" },
+    { command: "custom", description: "Custom personality" },
+    { command: "text", description: "Text replies" },
+    { command: "voice", description: "Voice replies" },
+  ];
+
+  // Default + per-language menus
+  // Telegram sometimes shows commands per-scope (private/group). Keep both in sync.
+  await bot.setMyCommands(ru);
+  await bot.setMyCommands(en, { language_code: "en" });
+  await bot.setMyCommands(ru, { language_code: "ru" });
+
+  // Private chats
+  await bot.setMyCommands(ru, { scope: { type: "all_private_chats" } });
+  await bot.setMyCommands(en, { scope: { type: "all_private_chats" }, language_code: "en" });
+  await bot.setMyCommands(ru, { scope: { type: "all_private_chats" }, language_code: "ru" });
+
+  // Group chats (optional but prevents mismatch)
+  await bot.setMyCommands(ru, { scope: { type: "all_group_chats" } });
+  await bot.setMyCommands(en, { scope: { type: "all_group_chats" }, language_code: "en" });
+  await bot.setMyCommands(ru, { scope: { type: "all_group_chats" }, language_code: "ru" });
+}
 
 // ====== WAITING STATES ======
 const awaitingCustom = new Map(); // userId -> true
@@ -658,18 +714,22 @@ bot.onText(/^\/length(@\w+)?$/, async (msg) => {
   });
 });
 
-bot.onText(/^\/scan(@\w+)?$/, async (msg) => {
+// /scan [text]
+// NOTE: Telegram command menu can't contain spaces in a command name.
+// So we keep everything under /scan and parse an optional argument: /scan text
+bot.onText(/^\/scan(@\w+)?(?:\s+(text))?$/i, async (msg, m) => {
   const user = getUser(msg.from.id);
-  awaitingScan.set(msg.from.id, true);
-  awaitingScanText.delete(msg.from.id);
-  await bot.sendMessage(msg.chat.id, t(user, "scanSendPhotoDetect"));
-});
+  const mode = (m && m[2] ? String(m[2]).toLowerCase() : "");
 
-bot.onText(/^\/scan text(@\w+)?$/, async (msg) => {
-  const user = getUser(msg.from.id);
-  awaitingScanText.set(msg.from.id, true);
-  awaitingScan.delete(msg.from.id);
-  await bot.sendMessage(msg.chat.id, t(user, "scanSendPhotoText"));
+  if (mode === "text") {
+    awaitingScanText.set(msg.from.id, true);
+    awaitingScan.delete(msg.from.id);
+    await bot.sendMessage(msg.chat.id, t(user, "scanSendPhotoText"));
+  } else {
+    awaitingScan.set(msg.from.id, true);
+    awaitingScanText.delete(msg.from.id);
+    await bot.sendMessage(msg.chat.id, t(user, "scanSendPhotoDetect"));
+  }
 });
 
 // ====== ADMIN ======
@@ -1077,9 +1137,19 @@ bot.on("message", async (msg) => {
 
 // ensure user exists + language
 let user = getUser(userId);
+
+// 1) For brand-new users: pick lang by Telegram UI code
 if (!user.lang || user.lang.trim() === "") {
   const lg = detectLangFromTelegram(msg.from?.language_code);
   setLang(userId, lg);
+  user = getUser(userId);
+}
+
+// 2) СНГ-эвристика: если пользователь пишет кириллицей/армянским, а lang=EN — переключаем на RU
+// (многие ставят Telegram UI на English, но хотят ответы по-русски)
+const incomingText = (msg.text || msg.caption || "");
+if ((user.lang || "").toLowerCase() === "en" && looksCyrillicOrArmenian(incomingText)) {
+  setLang(userId, "ru");
   user = getUser(userId);
 }
 
@@ -1104,7 +1174,7 @@ if (msg.photo && msg.photo.length) {
         await bot.sendMessage(chatId, (text || "").trim() || t(user, "scanNoText"));
       } catch (e) {
         console.error("scan text error:", e?.message || e);
-        await bot.sendMessage(chatId, "Не получилось распознать текст.");
+        await bot.sendMessage(chatId, (user.lang || "ru") === "en" ? "Couldn't read text from the image." : "Не получилось распознать текст.");
       }
     });
 
@@ -1128,14 +1198,20 @@ if (msg.photo && msg.photo.length) {
       const buf = fs.readFileSync(p);
 
       const b64 = buf.toString("base64");
+      const isEn = (user.lang || "ru").toLowerCase() === "en";
       const resp = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You identify the main subject of the image. If it's a well-known celebrity, answer ONLY with their name. If not a celebrity, answer with a short label (e.g., 'a dog', 'a car'). No extra text." },
+          {
+            role: "system",
+            content: isEn
+              ? "You identify the main subject of the image. If it's a well-known celebrity, answer ONLY with their name. If not a celebrity, answer with a short label (e.g., 'a dog', 'a car'). No extra text."
+              : "Ты определяешь главный объект на фото. Если это известная знаменитость — ответь ТОЛЬКО именем и фамилией. Если это не знаменитость — ответь коротким ярлыком (например, 'собака', 'машина'). Без лишнего текста.",
+          },
           {
             role: "user",
             content: [
-              { type: "text", text: "Identify who/what is in this photo." },
+              { type: "text", text: isEn ? "Identify who/what is in this photo." : "Определи кто/что на этом фото." },
               { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } }
             ]
           }

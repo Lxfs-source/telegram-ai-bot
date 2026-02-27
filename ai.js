@@ -73,19 +73,38 @@ async function ttsToMp3(text, outMp3Path, voice = "alloy") {
 async function ocrWithGemini(imageBuffer) {
   if (!genAI) throw new Error("GEMINI_API_KEY not set");
 
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  // NOTE: Google периодически снимает/переименовывает модели.
+  // Поэтому:
+  // 1) используем актуальную стабильную модель по умолчанию
+  // 2) если получаем 404 (model not found) — пробуем alias "gemini-flash-latest"
+  const primary = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const fallback = process.env.GEMINI_MODEL_FALLBACK || "gemini-flash-latest";
 
-  const result = await model.generateContent([
-    "Вытащи весь читаемый текст с изображения. Верни только текст, без комментариев.",
-    {
-      inlineData: {
-        data: imageBuffer.toString("base64"),
-        mimeType: "image/jpeg",
+  async function call(modelName) {
+    const model = genAI.getGenerativeModel({ model: modelName });
+    const result = await model.generateContent([
+      // Требование: вернуть РОВНО текст, без комментариев.
+      "Extract ALL readable text from this image. Return ONLY the text, no commentary.",
+      {
+        inlineData: {
+          data: imageBuffer.toString("base64"),
+          // Telegram фото обычно jpeg. Если будет png — Google часто тоже принимает.
+          mimeType: "image/jpeg",
+        },
       },
-    },
-  ]);
+    ]);
+    return (result.response.text() || "").trim();
+  }
 
-  return (result.response.text() || "").trim();
+  try {
+    return await call(primary);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.includes("404") || msg.toLowerCase().includes("not found") || msg.includes("models/")) {
+      return await call(fallback);
+    }
+    throw e;
+  }
 }
 
 // --- Image generation (OpenAI) ---
