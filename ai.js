@@ -1,6 +1,7 @@
-const OpenAI = require("openai");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// ai.js (CommonJS) — compatible with openai@6.x (ESM-only) via dynamic import
+
 const fs = require("fs");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const openaiKey = process.env.OPENAI_API_KEY;
 const geminiKey = process.env.GEMINI_API_KEY;
@@ -8,17 +9,33 @@ const geminiKey = process.env.GEMINI_API_KEY;
 if (!openaiKey) console.warn("OPENAI_API_KEY is not set");
 if (!geminiKey) console.warn("GEMINI_API_KEY is not set");
 
-const openai = new OpenAI({ apiKey: openaiKey });
 const genAI = geminiKey ? new GoogleGenerativeAI(geminiKey) : null;
+
+// --- OpenAI client loader (openai@6 is ESM) ---
+let _openaiPromise = null;
+
+async function getOpenAI() {
+  if (_openaiPromise) return _openaiPromise;
+
+  _openaiPromise = import("openai").then((m) => {
+    const OpenAI = m.default;
+    return new OpenAI({ apiKey: openaiKey });
+  });
+
+  return _openaiPromise;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 // --- Chat (OpenAI по умолчанию) ---
 async function chatOpenAI({ system, messages }) {
+  const openai = await getOpenAI();
+
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: system },
-      ...messages,
-    ],
+    messages: [{ role: "system", content: system }, ...messages],
   });
 
   return resp.choices?.[0]?.message?.content?.trim() || "…";
@@ -26,19 +43,24 @@ async function chatOpenAI({ system, messages }) {
 
 // --- STT (голос -> текст) ---
 async function transcribeAudioMp3(mp3Path) {
+  const openai = await getOpenAI();
+
   const file = fs.createReadStream(mp3Path);
   const resp = await openai.audio.transcriptions.create({
     model: "gpt-4o-mini-transcribe",
     file,
   });
+
   return (resp.text || "").trim();
 }
 
 // --- TTS (текст -> mp3) ---
-async function ttsToMp3(text, outMp3Path) {
+async function ttsToMp3(text, outMp3Path, voice = "alloy") {
+  const openai = await getOpenAI();
+
   const resp = await openai.audio.speech.create({
     model: "gpt-4o-mini-tts",
-    voice: "alloy",
+    voice,
     input: text,
     format: "mp3",
   });
@@ -68,70 +90,25 @@ async function ocrWithGemini(imageBuffer) {
 
 // --- Image generation (OpenAI) ---
 async function generateImage(prompt) {
+  const openai = await getOpenAI();
+
   const resp = await openai.images.generate({
     model: "gpt-image-1",
     prompt,
     size: "1024x1024",
   });
 
-  // URL может не вернуться в некоторых режимах, но обычно есть base64 или url.
   const item = resp.data?.[0];
   if (item?.url) return { type: "url", value: item.url };
   if (item?.b64_json) return { type: "b64", value: item.b64_json };
+
   throw new Error("No image returned");
 }
 
-// --- Video generation (Sora) ---
-// seconds must be one of: "4" | "8" | "12"
-export async function generateVideoToBuffer({ prompt, seconds = 4, model = "sora-2" }) {
-  try {
-    // В API seconds — строго "4" | "8" | "12"
-    const secondsStr = String(seconds); // "4" или "12"
-
-    let video = await openai.videos.create({
-      model,
-      prompt,
-      seconds: secondsStr,
-      // size можешь оставить дефолт или указать, например:
-      // size: "720x1280",
-    });
-
-    // manual polling
-    const startedAt = Date.now();
-    const timeoutMs = 6 * 60 * 1000; // 6 минут
-
-    while (video.status === "queued" || video.status === "in_progress") {
-      if (Date.now() - startedAt > timeoutMs) {
-        throw new Error("Video generation timeout");
-      }
-      await new Promise((r) => setTimeout(r, 2500));
-      video = await openai.videos.retrieve(video.id);
-    }
-
-    if (video.status !== "completed") {
-      const msg = video?.error?.message || "Video generation failed";
-      throw new Error(msg);
-    }
-
-    // скачать mp4
-    const res = await openai.videos.downloadContent(video.id, { variant: "mp4" });
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch (e) {
-    console.error("generateVideo error:", e);
-    throw e;
-  }
-}
-module.exports = {
-  chatOpenAI,
-  transcribeAudioMp3,
-  ttsToMp3,
-  ocrWithGemini,
-  generateImage,
-  generateVideoToBuffer,
-  decideSearch,
-};
+// --- Decide if web-search needed (router) ---
 async function decideSearch({ userText }) {
+  const openai = await getOpenAI();
+
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
@@ -158,3 +135,49 @@ async function decideSearch({ userText }) {
     return { search: false, query: "" };
   }
 }
+
+// --- Video generation (OpenAI Videos API) -> Buffer(mp4) ---
+async function generateVideoToBuffer({ prompt, seconds = 4, model = "sora-2" }) {
+  const openai = await getOpenAI();
+
+  const secondsStr = String(seconds); // must be "4" | "8" | "12"
+  let video = await openai.videos.create({
+    model,
+    prompt,
+    seconds: secondsStr,
+  });
+
+  const startedAt = Date.now();
+  const timeoutMs = 6 * 60 * 1000; // 6 minutes
+
+  while (video.status === "queued" || video.status === "in_progress") {
+    if (Date.now() - startedAt > timeoutMs) throw new Error("Video generation timeout");
+    await sleep(2500);
+    video = await openai.videos.retrieve(video.id);
+  }
+
+  if (video.status !== "completed") {
+    throw new Error(video?.error?.message || "Video generation failed");
+  }
+
+  // Download mp4
+  let res;
+  try {
+    res = await openai.videos.downloadContent(video.id, { variant: "mp4" });
+  } catch {
+    res = await openai.videos.downloadContent(video.id);
+  }
+
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+module.exports = {
+  chatOpenAI,
+  transcribeAudioMp3,
+  ttsToMp3,
+  ocrWithGemini,
+  generateImage,
+  decideSearch,
+  generateVideoToBuffer,
+};
