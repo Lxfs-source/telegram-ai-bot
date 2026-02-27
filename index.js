@@ -594,27 +594,37 @@ async function handleImagePrompt({ msg, prompt }) {
     return;
   }
 
-  await bot.sendMessage(chatId, "🖼 Генерирую...");
+  await bot.sendMessage(chatId, "🖼 Генерирую картинку...");
 
- try {
-  const buf = await generateVideoToBuffer({ prompt, seconds, model: "sora-2" });
-  const fixedBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-  // отправка mp4...
-} catch (e) {
-  const msg = String(e?.message || e);
+  try {
+    const img = await generateImage(prompt);
 
-  if (msg.toLowerCase().includes("moderation") || msg.toLowerCase().includes("blocked")) {
-    // ВАЖНО: лимит НЕ списываем
-    await bot.sendMessage(chatId,
-      "⛔ Запрос на видео заблокирован модерацией.\n" +
-      "Попробуй переформулировать без 18+, жестокости, оружия, наркотиков, хейта и без реальных людей.\n\n" +
-      "Пример: /video милый кот пьет кофе в неоновом городе, мульт-стиль"
-    );
-    return;
+    // generateImage может вернуть URL или base64
+    if (img?.type === "url") {
+      await bot.sendPhoto(chatId, img.value, {
+        caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
+      });
+      return;
+    }
+
+    if (img?.type === "b64") {
+      const filename = `img_${chatId}_${Date.now()}.png`;
+      const outPath = tmpFile(filename);
+
+      const b = Buffer.from(img.value, "base64");
+      fs.writeFileSync(outPath, b);
+
+      await bot.sendPhoto(chatId, outPath, {
+        caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
+      });
+      return;
+    }
+
+    throw new Error("Unknown image response");
+  } catch (e) {
+    console.error("generateImage error:", e?.message || e);
+    await bot.sendMessage(chatId, "Не получилось сгенерировать изображение. Попробуй другой запрос.");
   }
-
-  await bot.sendMessage(chatId, "❌ Ошибка генерации видео: " + msg);
-}
 }
 
 async function handleVideoPrompt({ msg, prompt }) {
@@ -630,27 +640,42 @@ async function handleVideoPrompt({ msg, prompt }) {
     return;
   }
 
-  // Sora API принимает seconds как строку: "4" | "8" | "12"
   const seconds = premium ? "12" : "4";
-
   await bot.sendMessage(chatId, `🎬 Генерирую видео (${seconds} сек)...`);
 
   try {
-    const { buffer } = await generateVideoToBuffer({
+    // generateVideoToBuffer должен вернуть Buffer ИЛИ ArrayBuffer
+    const buf = await generateVideoToBuffer({
       prompt,
       seconds,
       model: "sora-2",
     });
 
+    // Приводим к Node Buffer в любом случае
+    const fixedBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+
     const filename = `video_${chatId}_${Date.now()}.mp4`;
     const outPath = tmpFile(filename);
-    fs.writeFileSync(outPath, buffer);
+
+    fs.writeFileSync(outPath, fixedBuf);
 
     await bot.sendVideo(chatId, outPath, {
       caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
     });
   } catch (e) {
-    console.error("generateVideo error:", e?.message || e);
+    const emsg = String(e?.message || e);
+    console.error("generateVideo error:", emsg);
+
+    if (emsg.toLowerCase().includes("moderation") || emsg.toLowerCase().includes("blocked")) {
+      await bot.sendMessage(
+        chatId,
+        "⛔ Запрос на видео заблокирован модерацией.\n" +
+          "Переформулируй без 18+, жестокости, оружия, наркотиков, хейта и без реальных людей.\n" +
+          "Пример: /video милый кот пьет кофе в неоновом городе, мульт-стиль"
+      );
+      return;
+    }
+
     await bot.sendMessage(chatId, "Не получилось сгенерировать видео. Попробуй другой запрос.");
   }
 }
