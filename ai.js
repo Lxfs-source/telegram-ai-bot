@@ -83,25 +83,45 @@ async function generateImage(prompt) {
 
 // --- Video generation (Sora) ---
 // seconds must be one of: "4" | "8" | "12"
-async function generateVideoToBuffer({ prompt, seconds = "4", model = "sora-2" }) {
-  // create + poll
-  const video = await openai.videos.createAndPoll({
-    model,
-    prompt,
-    seconds: String(seconds),
-    size: "1280x720",
-  });
+export async function generateVideoToBuffer({ prompt, seconds = 4, model = "sora-2" }) {
+  try {
+    // В API seconds — строго "4" | "8" | "12"
+    const secondsStr = String(seconds); // "4" или "12"
 
-  if (video.status !== "completed") {
-    const msg = video?.error?.message || `Video generation failed. Status: ${video.status}`;
-    throw new Error(msg);
+    let video = await openai.videos.create({
+      model,
+      prompt,
+      seconds: secondsStr,
+      // size можешь оставить дефолт или указать, например:
+      // size: "720x1280",
+    });
+
+    // manual polling
+    const startedAt = Date.now();
+    const timeoutMs = 6 * 60 * 1000; // 6 минут
+
+    while (video.status === "queued" || video.status === "in_progress") {
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error("Video generation timeout");
+      }
+      await new Promise((r) => setTimeout(r, 2500));
+      video = await openai.videos.retrieve(video.id);
+    }
+
+    if (video.status !== "completed") {
+      const msg = video?.error?.message || "Video generation failed";
+      throw new Error(msg);
+    }
+
+    // скачать mp4
+    const res = await openai.videos.downloadContent(video.id, { variant: "mp4" });
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } catch (e) {
+    console.error("generateVideo error:", e);
+    throw e;
   }
-
-  const content = await openai.videos.downloadContent(video.id);
-  const buf = Buffer.from(await content.arrayBuffer());
-  return { videoId: video.id, buffer: buf };
 }
-
 module.exports = {
   chatOpenAI,
   transcribeAudioMp3,
