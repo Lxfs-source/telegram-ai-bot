@@ -8,6 +8,21 @@ const TelegramBot = require("node-telegram-bot-api");
 const PREMIUM_PRICE_XTR = parseInt(process.env.PREMIUM_PRICE_XTR || "299", 10);
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || "30", 10);
 
+const PRO_CREDITS_MONTHLY = parseInt(process.env.PRO_CREDITS_MONTHLY || "12", 10);
+const PROPLUS_PRICE_XTR = parseInt(process.env.PROPLUS_PRICE_XTR || "599", 10);
+const PROPLUS_CREDITS_MONTHLY = parseInt(process.env.PROPLUS_CREDITS_MONTHLY || "30", 10);
+
+const CREDIT_PACKS = [
+  { id: "pack5", credits: 5, priceXTR: parseInt(process.env.CREDITS5_PRICE_XTR || "59", 10) },
+  { id: "pack15", credits: 15, priceXTR: parseInt(process.env.CREDITS15_PRICE_XTR || "149", 10) },
+  { id: "pack40", credits: 40, priceXTR: parseInt(process.env.CREDITS40_PRICE_XTR || "349", 10) },
+];
+
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((s) => parseInt(s.trim(), 10))
+  .filter((n) => Number.isFinite(n));
+
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -30,13 +45,22 @@ const {
   setResponseMode,
   setPersonality,
   setCustomPersonality,
-  setVoiceKey,          // <-- добавим в database.js (патч ниже)
+  setVoiceKey,
   isPremium,
   addMessage,
   getLastMessages,
   consumeImage,
   consumeVoice,
-  consumeVideo,
+  // credits + settings
+  setLang,
+  setResponseLen,
+  setPremiumTier,
+  getCredits,
+  consumeVideoCredits,
+  refundVideoCredits,
+  addPurchasedCredits,
+  isPaymentProcessed,
+  recordPayment,
 } = require("./database");
 
 // ====== CONFIG ======
@@ -62,6 +86,94 @@ bot.on("webhook_error", (e) => console.log("webhook_error:", e?.message || e));
 let BOT_USERNAME = null;
 let BOT_ID = null;
 
+
+function detectLangFromTelegram(languageCode) {
+  const lc = (languageCode || "").toLowerCase();
+  const ruLike = ["ru","uk","be","kk","ky","uz","tg","az","hy","ka","mo"];
+  return ruLike.some((p) => lc.startsWith(p)) ? "ru" : "en";
+}
+
+const I18N = {
+  ru: {
+    balanceFull: (c, premLine) => `🎟️ Кредиты: ${c.total} (месячные: ${c.monthly}, купленные: ${c.purchased})\n${premLine}`,
+    premiumOff: "💎 Premium: нет",
+    premiumOn: (tier, until) => `💎 Premium: ${tier} (до ${until})`,
+    tierPro: "PRO",
+    tierProPlus: "PRO+",
+    noCredits: "❌ Кредиты закончились. Напиши /buy чтобы купить.",
+    buyTitle: "🛒 Магазин",
+    buyPick: "Выбери что купить:",
+    buyDetails: (proPrice, proDays, proCredits, proPlusPrice, proPlusDays, proPlusCredits, packsText) =>
+`Тарифы (Stars):\n\n⭐ PRO — ${proPrice} XTR / ${proDays} дней\n• ${proCredits} кредитов/мес\n\n✨ PRO+ — ${proPlusPrice} XTR / ${proPlusDays} дней\n• ${proPlusCredits} кредитов/мес\n\nПакеты кредитов:\n${packsText}\n\nℹ️ 1 кредит = 1 видео на 4 секунды\n8 сек = 2 кредита, 12 сек = 3 кредита`,
+    proDesc: (days, c) => `Premium PRO на ${days} дней + ${c} кредитов/мес`,
+    proplusDesc: (days, c) => `Premium PRO+ на ${days} дней + ${c} кредитов/мес`,
+    packDesc: (n) => `Пакет кредитов: +${n}`,
+    payNotSupported: "Не смог выставить счёт. Проверь, что бот поддерживает оплаты Stars.",
+    scanSendPhotoDetect: "📷 Отправь фото — скажу кто/что на нём.",
+    scanSendPhotoText: "📷 Отправь фото — верну текст точь-в-точь.",
+    scanNoText: "Текст не найден.",
+    lengthPick: "Выбери длину ответов:",
+    lengthConcise: "Только по делу",
+    lengthNormal: "Обычно",
+    queued: "⏳ Поставил в очередь.",
+    tooManyQueued: "❌ Слишком много задач. Подожди пока выполнится.",
+    cooldown: "⏳ Слишком часто. Подожди немного.",
+    adminOnly: "❌ Только для админа.",
+    adminHelp:
+`/givepremium USER_ID DAYS
+/givecredits USER_ID AMOUNT
+/setlang USER_ID ru|en
+/stats`,
+  },
+  en: {
+    balanceFull: (c, premLine) => `🎟️ Credits: ${c.total} (monthly: ${c.monthly}, purchased: ${c.purchased})\n${premLine}`,
+    premiumOff: "💎 Premium: no",
+    premiumOn: (tier, until) => `💎 Premium: ${tier} (until ${until})`,
+    tierPro: "PRO",
+    tierProPlus: "PRO+",
+    noCredits: "❌ No credits left. Use /buy to purchase.",
+    buyTitle: "🛒 Store",
+    buyPick: "Choose a purchase:",
+    buyDetails: (proPrice, proDays, proCredits, proPlusPrice, proPlusDays, proPlusCredits, packsText) =>
+`Plans (Stars):\n\n⭐ PRO — ${proPrice} XTR / ${proDays} days\n• ${proCredits} credits/month\n\n✨ PRO+ — ${proPlusPrice} XTR / ${proPlusDays} days\n• ${proPlusCredits} credits/month\n\nCredit packs:\n${packsText}\n\nℹ️ 1 credit = 1 video (4 seconds)\n8s = 2 credits, 12s = 3 credits`,
+    proDesc: (days, c) => `Premium PRO for ${days} days + ${c} credits/month`,
+    proplusDesc: (days, c) => `Premium PRO+ for ${days} days + ${c} credits/month`,
+    packDesc: (n) => `Credit pack: +${n}`,
+    payNotSupported: "Couldn't create an invoice. Make sure Stars payments are supported.",
+    scanSendPhotoDetect: "📷 Send a photo — I'll identify who/what is on it.",
+    scanSendPhotoText: "📷 Send a photo — I'll extract the text exactly.",
+    scanNoText: "No text found.",
+    lengthPick: "Choose response length:",
+    lengthConcise: "Concise",
+    lengthNormal: "Normal",
+    queued: "⏳ Added to queue.",
+    tooManyQueued: "❌ Too many tasks queued. Please wait.",
+    cooldown: "⏳ Too fast. Please wait a bit.",
+    adminOnly: "❌ Admin only.",
+    adminHelp:
+`/givepremium USER_ID DAYS
+/givecredits USER_ID AMOUNT
+/setlang USER_ID ru|en
+/stats`,
+  }
+};
+
+function t(user, key, ...args) {
+  const lang = (user?.lang || "ru").toLowerCase() === "en" ? "en" : "ru";
+  const v = I18N[lang][key];
+  return typeof v === "function" ? v(...args) : (v || key);
+}
+
+
+
+bot.on("pre_checkout_query", async (q) => {
+  try {
+    await bot.answerPreCheckoutQuery(q.id, true);
+  } catch (e) {
+    console.error("pre_checkout_query error:", e?.message || e);
+  }
+});
+
 bot.getMe().then((me) => {
   BOT_USERNAME = me.username;
   BOT_ID = me.id;
@@ -72,6 +184,55 @@ bot.getMe().then((me) => {
 const awaitingCustom = new Map(); // userId -> true
 const awaitingImage = new Map();  // userId -> true
 const awaitingVideo = new Map();  // userId -> true
+
+
+const awaitingScan = new Map();      // userId -> true
+const awaitingScanText = new Map();  // userId -> true
+
+// ====== QUEUE (heavy tasks: video/image/scan) ======
+const TASK_QUEUE = [];
+let TASK_RUNNING = false;
+const queuedPerUser = new Map(); // userId -> count
+
+const COOLDOWN_MS = { video: 25000, image: 8000, scan: 6000 };
+const lastAction = new Map(); // `${userId}:${type}` -> ts
+
+function hitCooldown(userId, type) {
+  const k = `${userId}:${type}`;
+  const now = Date.now();
+  const last = lastAction.get(k) || 0;
+  if (now - last < (COOLDOWN_MS[type] || 5000)) return true;
+  lastAction.set(k, now);
+  return false;
+}
+
+function enqueueTask(userId, fn) {
+  const c = queuedPerUser.get(userId) || 0;
+  if (c >= 2) return false;
+
+  queuedPerUser.set(userId, c + 1);
+  TASK_QUEUE.push({ userId, fn });
+
+  if (!TASK_RUNNING) runQueue();
+  return true;
+}
+
+async function runQueue() {
+  TASK_RUNNING = true;
+  while (TASK_QUEUE.length) {
+    const task = TASK_QUEUE.shift();
+    try {
+      await task.fn();
+    } catch (e) {
+      console.error("queue task error:", e?.message || e);
+    } finally {
+      const c = queuedPerUser.get(task.userId) || 1;
+      queuedPerUser.set(task.userId, Math.max(0, c - 1));
+    }
+  }
+  TASK_RUNNING = false;
+}
+
 
 // ====== МНОГОЛИКИЙ СТЕПАН: база ======
 const BASE_SYSTEM = `
@@ -326,12 +487,26 @@ function formatDateTime(ms) {
 function buildSystemPrompt(user) {
   const custom = (user.custom_personality || "").trim();
 
-  if (custom.length > 0) {
-    return `${BASE_SYSTEM}\n\nТы должен строго следовать этой личности:\n${custom}`;
-  }
+  const base = (custom.length > 0)
+    ? `${BASE_SYSTEM}\n\nТы должен строго следовать этой личности:\n${custom}`
+    : (PERSONALITIES[user.personality]?.system || PERSONALITIES.default.system);
 
-  return PERSONALITIES[user.personality]?.system || PERSONALITIES.default.system;
+  const lang = (user.lang || "ru").toLowerCase() === "en" ? "en" : "ru";
+  const len = (user.response_len || "normal").toLowerCase();
+
+  const langLine = lang === "en"
+    ? "Reply in English."
+    : "Отвечай на русском.";
+
+  const lenLine = (len === "concise")
+    ? (lang === "en"
+        ? "Be concise: answer in 1-2 short sentences, only the essential information."
+        : "Будь кратким: 1-2 коротких предложения, только по делу.")
+    : "";
+
+  return [base, langLine, lenLine].filter(Boolean).join("\n");
 }
+
 
 // --- audio helpers ---
 function toMp3(inPath, outPath) {
@@ -400,7 +575,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
-  const user = getUser(userId);
+  user = user || getUser(userId);
   const premium = isPremium(user);
 
   if (premium) {
@@ -409,7 +584,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
     return;
   }
 
-  const payload = `premium:${userId}:${PREMIUM_DAYS}:${Date.now()}`;
+  const payload = `sub:pro:${userId}:${PREMIUM_DAYS}:${Date.now()}`;
 
   try {
     await bot.sendInvoice(
@@ -426,6 +601,124 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
     await bot.sendMessage(chatId, "Не смог выставить счёт. Проверь, что бот поддерживает оплаты Stars.");
   }
 });
+
+// ====== STORE / BALANCE / LENGTH / SCAN ======
+bot.onText(/^\/balance(@\w+)?$/, async (msg) => {
+  const user = getUser(msg.from.id);
+  const c = getCredits(msg.from.id);
+  const prem = isPremium(user);
+  let premLine = t(user, "premiumOff");
+  if (prem) {
+    const tier = (user.premium_tier || "pro").toLowerCase() === "proplus" ? t(user,"tierProPlus") : t(user,"tierPro");
+    premLine = t(user, "premiumOn", tier, formatDateTime(user.premium_until));
+  }
+  await bot.sendMessage(msg.chat.id, t(user, "balanceFull", c, premLine));
+});
+
+bot.onText(/^\/buy(@\w+)?$/, async (msg) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const user = getUser(userId);
+
+  const packsText = CREDIT_PACKS
+    .map((p) => `• +${p.credits} — ${p.priceXTR} XTR`)
+    .join("\n");
+
+  const details = t(
+    user,
+    "buyDetails",
+    PREMIUM_PRICE_XTR,
+    PREMIUM_DAYS,
+    PRO_CREDITS_MONTHLY,
+    PROPLUS_PRICE_XTR,
+    PREMIUM_DAYS,
+    PROPLUS_CREDITS_MONTHLY,
+    packsText
+  );
+
+  const buttons = [
+    [{ text: "PRO", callback_data: "buy:pro" }, { text: "PRO+", callback_data: "buy:proplus" }],
+    ...CREDIT_PACKS.map((p) => [{ text: `+${p.credits}`, callback_data: `buy:${p.id}` }]),
+  ];
+
+  await bot.sendMessage(chatId, `${t(user, "buyTitle")}\n${t(user, "buyPick")}\n\n${details}`, {
+    reply_markup: { inline_keyboard: buttons },
+  });
+});
+
+bot.onText(/^\/length(@\w+)?$/, async (msg) => {
+  const user = getUser(msg.from.id);
+  await bot.sendMessage(msg.chat.id, t(user, "lengthPick"), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: t(user, "lengthConcise"), callback_data: "len:concise" }],
+        [{ text: t(user, "lengthNormal"), callback_data: "len:normal" }],
+      ],
+    },
+  });
+});
+
+bot.onText(/^\/scan(@\w+)?$/, async (msg) => {
+  const user = getUser(msg.from.id);
+  awaitingScan.set(msg.from.id, true);
+  awaitingScanText.delete(msg.from.id);
+  await bot.sendMessage(msg.chat.id, t(user, "scanSendPhotoDetect"));
+});
+
+bot.onText(/^\/scan text(@\w+)?$/, async (msg) => {
+  const user = getUser(msg.from.id);
+  awaitingScanText.set(msg.from.id, true);
+  awaitingScan.delete(msg.from.id);
+  await bot.sendMessage(msg.chat.id, t(user, "scanSendPhotoText"));
+});
+
+// ====== ADMIN ======
+bot.onText(/^\/admin(@\w+)?$/, async (msg) => {
+  const user = getUser(msg.from.id);
+  if (!ADMIN_IDS.includes(msg.from.id)) return bot.sendMessage(msg.chat.id, t(user, "adminOnly"));
+  return bot.sendMessage(msg.chat.id, t(user, "adminHelp"));
+});
+
+bot.onText(/^\/givepremium(@\w+)?\s+(\d+)\s+(\d+)$/, async (msg, m) => {
+  const user = getUser(msg.from.id);
+  if (!ADMIN_IDS.includes(msg.from.id)) return bot.sendMessage(msg.chat.id, t(user, "adminOnly"));
+  const uid = parseInt(m[2], 10);
+  const days = parseInt(m[3], 10);
+  if (!Number.isFinite(uid) || !Number.isFinite(days)) return;
+  setPremium(uid, days);
+  setPremiumTier(uid, "pro");
+  await bot.sendMessage(msg.chat.id, `✅ OK: premium ${uid} for ${days} days`);
+});
+
+bot.onText(/^\/givecredits(@\w+)?\s+(\d+)\s+(\d+)$/, async (msg, m) => {
+  const user = getUser(msg.from.id);
+  if (!ADMIN_IDS.includes(msg.from.id)) return bot.sendMessage(msg.chat.id, t(user, "adminOnly"));
+  const uid = parseInt(m[2], 10);
+  const amount = parseInt(m[3], 10);
+  if (!Number.isFinite(uid) || !Number.isFinite(amount)) return;
+  addPurchasedCredits(uid, amount);
+  await bot.sendMessage(msg.chat.id, `✅ OK: +${amount} credits to ${uid}`);
+});
+
+bot.onText(/^\/setlang(@\w+)?\s+(\d+)\s+(ru|en)$/, async (msg, m) => {
+  const user = getUser(msg.from.id);
+  if (!ADMIN_IDS.includes(msg.from.id)) return bot.sendMessage(msg.chat.id, t(user, "adminOnly"));
+  const uid = parseInt(m[2], 10);
+  const lang = m[3];
+  setLang(uid, lang);
+  await bot.sendMessage(msg.chat.id, `✅ OK: lang ${uid} -> ${lang}`);
+});
+
+bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
+  const user = getUser(msg.from.id);
+  if (!ADMIN_IDS.includes(msg.from.id)) return bot.sendMessage(msg.chat.id, t(user, "adminOnly"));
+  const Database = require("better-sqlite3");
+  const d = new Database("bot.db");
+  const users = d.prepare("SELECT COUNT(*) as c FROM users").get().c;
+  const prem = d.prepare("SELECT COUNT(*) as c FROM users WHERE is_premium=1").get().c;
+  await bot.sendMessage(msg.chat.id, `👥 users: ${users}\n💎 premium: ${prem}`);
+});
+
 
 bot.onText(/^\/text(@\w+)?$/, async (msg) => {
   getUser(msg.from.id);
@@ -541,6 +834,50 @@ bot.on("callback_query", async (q) => {
   await bot.answerCallbackQuery(q.id).catch(() => {});
 
   try {
+    // STORE purchase buttons
+    if (data.startsWith("buy:")) {
+      const user = getUser(userId);
+      const what = data.slice("buy:".length);
+
+      if (what === "pro" || what === "proplus") {
+        const tier = what === "proplus" ? "proplus" : "pro";
+        const price = tier === "proplus" ? PROPLUS_PRICE_XTR : PREMIUM_PRICE_XTR;
+        const credits = tier === "proplus" ? PROPLUS_CREDITS_MONTHLY : PRO_CREDITS_MONTHLY;
+        const title = tier === "proplus" ? "Premium PRO+" : "Premium PRO";
+        const desc = tier === "proplus"
+          ? t(user, "proplusDesc", PREMIUM_DAYS, credits)
+          : t(user, "proDesc", PREMIUM_DAYS, credits);
+
+        const payload = `sub:${tier}:${userId}:${PREMIUM_DAYS}:${Date.now()}`;
+        await bot.sendInvoice(chatId, title, desc, payload, "", "XTR", [
+          { label: title, amount: price },
+        ]);
+        return;
+      }
+
+      const pack = CREDIT_PACKS.find((p) => p.id === what);
+      if (pack) {
+        const payload = `credits:${userId}:${pack.credits}:${Date.now()}`;
+        await bot.sendInvoice(chatId, t(user, "buyTitle"), t(user, "packDesc", pack.credits), payload, "", "XTR", [
+          { label: `+${pack.credits} credits`, amount: pack.priceXTR },
+        ]);
+        return;
+      }
+
+      return;
+    }
+
+    // LENGTH buttons
+    if (data.startsWith("len:")) {
+      const user = getUser(userId);
+      const v = data.slice("len:".length);
+      if (v === "concise" || v === "normal") {
+        setResponseLen(userId, v);
+        await bot.sendMessage(chatId, `✅ ${v === "concise" ? t(user, "lengthConcise") : t(user, "lengthNormal")}`);
+      }
+      return;
+    }
+
     // 1) VOICE (выбор голоса)
     if (data.startsWith("voice_")) {
       const key = data.slice("voice_".length);
@@ -586,45 +923,53 @@ async function handleImagePrompt({ msg, prompt }) {
   const chatId = msg.chat.id;
 
   const user = getUser(userId);
-  const premium = isPremium(user);
 
-  const lim = consumeImage(userId, premium);
-  if (!lim.ok) {
-    await bot.sendMessage(chatId, `Лимит картинок исчерпан.\nВаш лимит: ${lim.max} в день.`);
+  if (hitCooldown(userId, "image")) {
+    await bot.sendMessage(chatId, t(user, "cooldown"));
     return;
   }
 
-  await bot.sendMessage(chatId, "🖼 Генерирую картинку...");
+  const okQueued = enqueueTask(userId, async () => {
+    const u = getUser(userId);
+    const premium = isPremium(u);
 
-  try {
-    const img = await generateImage(prompt);
-
-    // generateImage может вернуть URL или base64
-    if (img?.type === "url") {
-      await bot.sendPhoto(chatId, img.value, {
-        caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
-      });
+    const lim = consumeImage(userId, premium);
+    if (!lim.ok) {
+      await bot.sendMessage(chatId, `Лимит картинок исчерпан.\nВаш лимит: ${lim.max} в день.`);
       return;
     }
 
-    if (img?.type === "b64") {
-      const filename = `img_${chatId}_${Date.now()}.png`;
-      const outPath = tmpFile(filename);
+    await bot.sendMessage(chatId, "🖼 Генерирую картинку...");
 
-      const b = Buffer.from(img.value, "base64");
-      fs.writeFileSync(outPath, b);
+    try {
+      const img = await generateImage(prompt);
 
-      await bot.sendPhoto(chatId, outPath, {
-        caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
-      });
-      return;
+      if (img?.type === "url") {
+        await bot.sendPhoto(chatId, img.value, { caption: `Готово ✅` });
+        return;
+      }
+
+      if (img?.type === "b64") {
+        const filename = `img_${chatId}_${Date.now()}.png`;
+        const outPath = tmpFile(filename);
+        fs.writeFileSync(outPath, Buffer.from(img.value, "base64"));
+        await bot.sendPhoto(chatId, outPath, { caption: `Готово ✅` });
+        return;
+      }
+
+      await bot.sendMessage(chatId, "Не получилось сгенерировать картинку.");
+    } catch (e) {
+      const emsg = String(e?.message || e);
+      console.error("generateImage error:", emsg);
+      await bot.sendMessage(chatId, "Не получилось сгенерировать картинку. Попробуй другой запрос.");
     }
+  });
 
-    throw new Error("Unknown image response");
-  } catch (e) {
-    console.error("generateImage error:", e?.message || e);
-    await bot.sendMessage(chatId, "Не получилось сгенерировать изображение. Попробуй другой запрос.");
+  if (!okQueued) {
+    await bot.sendMessage(chatId, t(user, "tooManyQueued"));
+    return;
   }
+  await bot.sendMessage(chatId, t(user, "queued"));
 }
 
 async function handleVideoPrompt({ msg, prompt }) {
@@ -632,52 +977,95 @@ async function handleVideoPrompt({ msg, prompt }) {
   const chatId = msg.chat.id;
 
   const user = getUser(userId);
-  const premium = isPremium(user);
 
-  const lim = consumeVideo(userId, premium);
-  if (!lim.ok) {
-    await bot.sendMessage(chatId, `Лимит видео исчерпан.\nВаш лимит: ${lim.max} в день.`);
+  if (hitCooldown(userId, "video")) {
+    await bot.sendMessage(chatId, t(user, "cooldown"));
     return;
   }
 
-  const seconds = premium ? "12" : "4";
-  await bot.sendMessage(chatId, `🎬 Генерирую видео (${seconds} сек)...`);
+  // optional seconds prefix: "/video 8 your prompt"
+  let seconds = 4;
+  const m = String(prompt || "").trim().match(/^(\d{1,2})\s+([\s\S]+)$/);
+  if (m) {
+    const s = parseInt(m[1], 10);
+    if ([4, 8, 12].includes(s)) {
+      seconds = s;
+      prompt = m[2];
+    }
+  }
 
-  try {
-    // generateVideoToBuffer должен вернуть Buffer ИЛИ ArrayBuffer
-    const buf = await generateVideoToBuffer({
-      prompt,
-      seconds,
-      model: "sora-2",
-    });
+  const creditsNeeded = Math.ceil(seconds / 4);
 
-    // Приводим к Node Buffer в любом случае
-    const fixedBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  const okQueued = enqueueTask(userId, async () => {
+    const u = getUser(userId);
 
-    const filename = `video_${chatId}_${Date.now()}.mp4`;
-    const outPath = tmpFile(filename);
-
-    fs.writeFileSync(outPath, fixedBuf);
-
-    await bot.sendVideo(chatId, outPath, {
-      caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
-    });
-  } catch (e) {
-    const emsg = String(e?.message || e);
-    console.error("generateVideo error:", emsg);
-
-    if (emsg.toLowerCase().includes("moderation") || emsg.toLowerCase().includes("blocked")) {
-      await bot.sendMessage(
-        chatId,
-        "⛔ Запрос на видео заблокирован модерацией.\n" +
-          "Переформулируй без 18+, жестокости, оружия, наркотиков, хейта и без реальных людей.\n" +
-          "Пример: /video милый кот пьет кофе в неоновом городе, мульт-стиль"
-      );
+    const c = getCredits(userId);
+    if (c.total < creditsNeeded) {
+      await bot.sendMessage(chatId, t(u, "noCredits"));
       return;
     }
 
-    await bot.sendMessage(chatId, "Не получилось сгенерировать видео. Попробуй другой запрос.");
+    const consumed = consumeVideoCredits(userId, creditsNeeded);
+    if (!consumed.ok) {
+      await bot.sendMessage(chatId, t(u, "noCredits"));
+      return;
+    }
+
+    await bot.sendMessage(chatId, `🎬 Генерирую видео (${seconds} сек)...`);
+
+    try {
+      const buf = await generateVideoToBuffer({
+        prompt,
+        seconds: String(seconds),
+        model: "sora-2",
+      });
+
+      const fixedBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+      const filename = `video_${chatId}_${Date.now()}.mp4`;
+      const outPath = tmpFile(filename);
+      fs.writeFileSync(outPath, fixedBuf);
+
+      const after = getCredits(userId);
+      await bot.sendVideo(chatId, outPath, {
+        caption: `Готово ✅\nОсталось кредитов: ${after.total}`,
+      });
+    } catch (e) {
+      const emsg = String(e?.message || e);
+      console.error("generateVideo error:", emsg);
+
+      // refund credits on fail
+      refundVideoCredits(userId, consumed.usedMonthly, consumed.usedPurchased);
+
+      if (emsg.toLowerCase().includes("moderation") || emsg.toLowerCase().includes("blocked")) {
+        await bot.sendMessage(
+          chatId,
+          "⛔ Запрос на видео заблокирован модерацией.\n" +
+            "Переформулируй без 18+, жестокости, оружия, наркотиков, хейта и без реальных людей.\n" +
+            "Пример: /video 4 милый кот пьет кофе в неоновом городе, мульт-стиль"
+        );
+        return;
+      }
+
+      if (emsg.toLowerCase().includes("timeout")) {
+        await bot.sendMessage(chatId, "⏳ Видео не успело сгенерироваться (таймаут). Попробуй ещё раз позже.");
+        return;
+      }
+
+      if (emsg.toLowerCase().includes("billing") || emsg.includes("429")) {
+        await bot.sendMessage(chatId, "💳 Лимит API исчерпан. Попробуй позже.");
+        return;
+      }
+
+      await bot.sendMessage(chatId, "Не получилось сгенерировать видео. Попробуй другой запрос.");
+    }
+  });
+
+  if (!okQueued) {
+    await bot.sendMessage(chatId, t(user, "tooManyQueued"));
+    return;
   }
+
+  await bot.sendMessage(chatId, t(user, "queued"));
 }
 
 // ====== MAIN MESSAGE HANDLER ======
@@ -687,24 +1075,152 @@ bot.on("message", async (msg) => {
 
   const chatId = msg.chat.id;
 
-  // успешная оплата Stars (оставляем как было)
-  if (msg.successful_payment) {
-    const sp = msg.successful_payment;
-    const payload = sp.invoice_payload || "";
+// ensure user exists + language
+let user = getUser(userId);
+if (!user.lang || user.lang.trim() === "") {
+  const lg = detectLangFromTelegram(msg.from?.language_code);
+  setLang(userId, lg);
+  user = getUser(userId);
+}
 
-    if (sp.currency === "XTR" && payload.startsWith("premium:")) {
-      const parts = payload.split(":");
-      const paidUserId = parseInt(parts[1], 10);
-      const days = parseInt(parts[2], 10);
+// /scan states: photo -> identify / OCR
+if (msg.photo && msg.photo.length) {
+  if (awaitingScanText.get(userId)) {
+    awaitingScanText.delete(userId);
 
-      if (paidUserId === userId && Number.isFinite(days)) {
-        const { setPremium } = require("./database");
-        setPremium(userId, days);
-        await bot.sendMessage(chatId, `✅ Premium активирован на ${days} дней.`);
+    if (hitCooldown(userId, "scan")) {
+      await bot.sendMessage(chatId, t(user, "cooldown"));
+      return;
+    }
+
+    const okQueued = enqueueTask(userId, async () => {
+      const file = msg.photo[msg.photo.length - 1];
+      const out = tmpFile(`scan_${userId}_${Date.now()}.jpg`);
+      const p = await downloadTelegramFile(bot, file.file_id, out);
+      const buf = fs.readFileSync(p);
+
+      try {
+        const text = await ocrWithGemini(buf);
+        await bot.sendMessage(chatId, (text || "").trim() || t(user, "scanNoText"));
+      } catch (e) {
+        console.error("scan text error:", e?.message || e);
+        await bot.sendMessage(chatId, "Не получилось распознать текст.");
       }
+    });
+
+    if (!okQueued) await bot.sendMessage(chatId, t(user, "tooManyQueued"));
+    else await bot.sendMessage(chatId, t(user, "queued"));
+    return;
+  }
+
+  if (awaitingScan.get(userId)) {
+    awaitingScan.delete(userId);
+
+    if (hitCooldown(userId, "scan")) {
+      await bot.sendMessage(chatId, t(user, "cooldown"));
+      return;
+    }
+
+    const okQueued = enqueueTask(userId, async () => {
+      const file = msg.photo[msg.photo.length - 1];
+      const out = tmpFile(`scan_${userId}_${Date.now()}.jpg`);
+      const p = await downloadTelegramFile(bot, file.file_id, out);
+      const buf = fs.readFileSync(p);
+
+      const b64 = buf.toString("base64");
+      const resp = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You identify the main subject of the image. If it's a well-known celebrity, answer ONLY with their name. If not a celebrity, answer with a short label (e.g., 'a dog', 'a car'). No extra text." },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Identify who/what is in this photo." },
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } }
+            ]
+          }
+        ]
+      });
+      const ans = resp.choices?.[0]?.message?.content?.trim() || "…";
+      await bot.sendMessage(chatId, ans);
+    });
+
+    if (!okQueued) await bot.sendMessage(chatId, t(user, "tooManyQueued"));
+    else await bot.sendMessage(chatId, t(user, "queued"));
+    return;
+  }
+}
+
+  // успешная оплата Stars (оставляем как было)
+  
+// успешная оплата Stars
+if (msg.successful_payment) {
+  const sp = msg.successful_payment;
+  const payload = sp.invoice_payload || "";
+
+  // idempotency: Telegram may resend successful_payment after reconnects
+  const chargeId = sp.telegram_payment_charge_id || sp.provider_payment_charge_id || "";
+  if (isPaymentProcessed(chargeId)) {
+    return;
+  }
+  recordPayment({
+    telegramChargeId: chargeId,
+    userId,
+    invoicePayload: payload,
+    totalAmount: sp.total_amount,
+    currency: sp.currency,
+  });
+
+  // subscription: sub:tier:userId:days:ts
+  if (sp.currency === "XTR" && payload.startsWith("sub:")) {
+    const parts = payload.split(":");
+    const tier = (parts[1] || "pro").toLowerCase();
+    const paidUserId = parseInt(parts[2], 10);
+    const days = parseInt(parts[3], 10);
+
+    if (paidUserId === userId && Number.isFinite(days)) {
+      setPremium(userId, days);
+      setPremiumTier(userId, tier === "proplus" ? "proplus" : "pro");
+
+      // give purchased credits upfront (so user sees value immediately)
+      const monthlyCredits = tier === "proplus" ? PROPLUS_CREDITS_MONTHLY : PRO_CREDITS_MONTHLY;
+      addPurchasedCredits(userId, monthlyCredits);
+
+      await bot.sendMessage(chatId, `✅ Premium активирован (${tier.toUpperCase()}) на ${days} дней. +${monthlyCredits} кредитов.`);
     }
     return;
   }
+
+  // credits pack: credits:userId:amount:ts
+  if (sp.currency === "XTR" && payload.startsWith("credits:")) {
+    const parts = payload.split(":");
+    const paidUserId = parseInt(parts[1], 10);
+    const amount = parseInt(parts[2], 10);
+
+    if (paidUserId === userId && Number.isFinite(amount) && amount > 0) {
+      addPurchasedCredits(userId, amount);
+      await bot.sendMessage(chatId, `✅ Начислено +${amount} кредитов.`);
+    }
+    return;
+  }
+
+  // legacy premium payload
+  if (sp.currency === "XTR" && payload.startsWith("premium:")) {
+    const parts = payload.split(":");
+    const paidUserId = parseInt(parts[1], 10);
+    const days = parseInt(parts[2], 10);
+
+    if (paidUserId === userId && Number.isFinite(days)) {
+      setPremium(userId, days);
+      setPremiumTier(userId, "pro");
+      addPurchasedCredits(userId, PRO_CREDITS_MONTHLY);
+      await bot.sendMessage(chatId, `✅ Premium активирован на ${days} дней. +${PRO_CREDITS_MONTHLY} кредитов.`);
+    }
+    return;
+  }
+
+  return;
+}
 
   // команды тут не обрабатываем
   if (msg.text && msg.text.startsWith("/")) return;
@@ -712,7 +1228,7 @@ bot.on("message", async (msg) => {
   // группы: отвечаем только если реплай/упоминание
   if (!shouldRespondInChat(msg)) return;
 
-  const user = getUser(userId);
+  user = user || getUser(userId);
   const premium = isPremium(user);
 
   // 1) если ждём /custom

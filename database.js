@@ -19,7 +19,14 @@ CREATE TABLE IF NOT EXISTS users (
     videos_date TEXT DEFAULT '',
 
     voices_week INTEGER DEFAULT 0,
-    voices_date TEXT DEFAULT ''
+    voices_date TEXT DEFAULT '',
+
+    lang TEXT DEFAULT '',
+    response_len TEXT DEFAULT 'normal',
+    premium_tier TEXT DEFAULT 'none',
+    credits_month TEXT DEFAULT '',
+    credits_monthly INTEGER DEFAULT 0,
+    credits_purchased INTEGER DEFAULT 0
 )
 `).run();
 
@@ -31,6 +38,18 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,       -- 'user' | 'assistant' | 'system'
     content TEXT NOT NULL,
     created_at INTEGER NOT NULL
+)
+`).run();
+
+// --- payments (idempotency for Telegram successful_payment) ---
+db.prepare(`
+CREATE TABLE IF NOT EXISTS payments (
+  telegram_charge_id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  invoice_payload TEXT NOT NULL,
+  total_amount INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 )
 `).run();
 
@@ -49,6 +68,30 @@ if (!userCols.includes("videos_today")) {
 if (!userCols.includes("videos_date")) {
   db.prepare("ALTER TABLE users ADD COLUMN videos_date TEXT DEFAULT ''").run();
 }
+
+// --- миграция: локализация и длина ответов + кредиты для видео ---
+const userCols2 = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+if (!userCols2.includes("lang")) {
+  db.prepare("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT ''").run();
+}
+if (!userCols2.includes("response_len")) {
+  db.prepare("ALTER TABLE users ADD COLUMN response_len TEXT DEFAULT 'normal'").run();
+}
+if (!userCols2.includes("premium_tier")) {
+  db.prepare("ALTER TABLE users ADD COLUMN premium_tier TEXT DEFAULT 'none'").run();
+}
+if (!userCols2.includes("credits_month")) {
+  db.prepare("ALTER TABLE users ADD COLUMN credits_month TEXT DEFAULT ''").run();
+}
+if (!userCols2.includes("credits_monthly")) {
+  db.prepare("ALTER TABLE users ADD COLUMN credits_monthly INTEGER DEFAULT 0").run();
+}
+if (!userCols2.includes("credits_purchased")) {
+  db.prepare("ALTER TABLE users ADD COLUMN credits_purchased INTEGER DEFAULT 0").run();
+}
+
+// migration safety: ensure payments table exists in older dbs
+// (CREATE TABLE IF NOT EXISTS already covers it)
 // ---------------- helpers ----------------
 function dayKey(d = new Date()) {
     // YYYY-MM-DD
@@ -56,6 +99,12 @@ function dayKey(d = new Date()) {
     const m = String(d.getMonth() + 1).padStart(2, "0");
     const da = String(d.getDate()).padStart(2, "0");
     return `${y}-${m}-${da}`;
+}
+
+function monthKey(d = new Date()) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    return `${y}-${m}`;
 }
 
 function isoWeekKey(d = new Date()) {
@@ -85,6 +134,10 @@ function getUser(userId) {
 
   // на всякий случай (если старый юзер без значения):
   if (!user.voice_key) user.voice_key = "alloy";
+
+  // ежемесячные кредиты (free/premium) + не трогаем купленные
+  ensureMonthlyCredits(user.user_id);
+  user = db.prepare("SELECT * FROM users WHERE user_id = ?").get(userId);
 
   return user;
 }
@@ -134,6 +187,99 @@ function isPremium(user) {
 function setUserVoice(userId, voiceKey) {
   // alias for backwards compatibility
   setVoiceKey(userId, voiceKey);
+}
+
+
+function setLang(userId, lang) {
+  db.prepare(`UPDATE users SET lang = ? WHERE user_id = ?`).run(lang, userId);
+}
+
+function setResponseLen(userId, responseLen) {
+  db.prepare(`UPDATE users SET response_len = ? WHERE user_id = ?`).run(responseLen, userId);
+}
+
+function setPremiumTier(userId, tier) {
+  db.prepare(`UPDATE users SET premium_tier = ? WHERE user_id = ?`).run(tier, userId);
+}
+
+function ensureMonthlyCredits(userId) {
+  const user = db.prepare("SELECT user_id, is_premium, premium_until, premium_tier, credits_month FROM users WHERE user_id = ?").get(userId);
+  if (!user) return;
+
+  const mk = monthKey();
+  if ((user.credits_month || "") === mk) return;
+
+  // reset monthly bucket each month; purchased bucket stays
+  const premiumActive = isPremium({ user_id: userId, is_premium: user.is_premium, premium_until: user.premium_until });
+  const tier = (user.premium_tier || "none").toLowerCase();
+
+  const baseMonthly =
+    premiumActive && tier === "proplus" ? 30 :
+    premiumActive && tier === "pro" ? 12 :
+    premiumActive ? 12 : // fallback
+    1; // free marketing credit per month
+
+  db.prepare(`
+    UPDATE users
+    SET credits_month = ?, credits_monthly = ?
+    WHERE user_id = ?
+  `).run(mk, baseMonthly, userId);
+}
+
+function getCredits(userId) {
+  ensureMonthlyCredits(userId);
+  const row = db.prepare(`SELECT credits_monthly, credits_purchased FROM users WHERE user_id = ?`).get(userId) || {};
+  const monthly = row.credits_monthly || 0;
+  const purchased = row.credits_purchased || 0;
+  return { monthly, purchased, total: monthly + purchased };
+}
+
+// consume N video credits (monthly first, then purchased)
+function consumeVideoCredits(userId, n = 1) {
+  ensureMonthlyCredits(userId);
+  const row = db.prepare(`SELECT credits_monthly, credits_purchased FROM users WHERE user_id = ?`).get(userId);
+  const monthly = row?.credits_monthly || 0;
+  const purchased = row?.credits_purchased || 0;
+  const total = monthly + purchased;
+
+  if (total < n) return { ok: false, usedMonthly: 0, usedPurchased: 0, left: total };
+
+  let need = n;
+  let usedMonthly = Math.min(monthly, need);
+  need -= usedMonthly;
+
+  let usedPurchased = 0;
+  if (need > 0) {
+    usedPurchased = need;
+  }
+
+  db.prepare(`
+    UPDATE users
+    SET credits_monthly = credits_monthly - ?,
+        credits_purchased = credits_purchased - ?
+    WHERE user_id = ?
+  `).run(usedMonthly, usedPurchased, userId);
+
+  const after = getCredits(userId);
+  return { ok: true, usedMonthly, usedPurchased, left: after.total };
+}
+
+function refundVideoCredits(userId, usedMonthly = 0, usedPurchased = 0) {
+  if ((usedMonthly || 0) <= 0 && (usedPurchased || 0) <= 0) return;
+  db.prepare(`
+    UPDATE users
+    SET credits_monthly = credits_monthly + ?,
+        credits_purchased = credits_purchased + ?
+    WHERE user_id = ?
+  `).run(usedMonthly || 0, usedPurchased || 0, userId);
+}
+
+function addPurchasedCredits(userId, amount) {
+  db.prepare(`
+    UPDATE users
+    SET credits_purchased = COALESCE(credits_purchased,0) + ?
+    WHERE user_id = ?
+  `).run(amount, userId);
 }
 
 function getUserVoice(userId) {
@@ -233,6 +379,23 @@ function consumeVideo(userId, premium) {
   return { ok: true, left: Math.max(0, max - used), max };
 }
 
+// ---------------- payments idempotency ----------------
+function isPaymentProcessed(telegramChargeId) {
+  if (!telegramChargeId) return false;
+  const row = db
+    .prepare("SELECT telegram_charge_id FROM payments WHERE telegram_charge_id = ?")
+    .get(String(telegramChargeId));
+  return !!row;
+}
+
+function recordPayment({ telegramChargeId, userId, invoicePayload, totalAmount, currency }) {
+  if (!telegramChargeId) return;
+  db.prepare(
+    `INSERT OR IGNORE INTO payments(telegram_charge_id, user_id, invoice_payload, total_amount, currency, created_at)
+     VALUES(?, ?, ?, ?, ?, ?)`
+  ).run(String(telegramChargeId), userId, String(invoicePayload || ""), totalAmount || 0, String(currency || ""), Date.now());
+}
+
 module.exports = {
     getUser,
     setResponseMode,
@@ -252,4 +415,16 @@ module.exports = {
     consumeImage,
     consumeVoice,
     consumeVideo,
+    // credits + i18n
+    setLang,
+    setResponseLen,
+    setPremiumTier,
+    getCredits,
+    consumeVideoCredits,
+    refundVideoCredits,
+    addPurchasedCredits,
+
+    // payments
+    isPaymentProcessed,
+    recordPayment,
 };
