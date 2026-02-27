@@ -596,18 +596,25 @@ async function handleImagePrompt({ msg, prompt }) {
 
   await bot.sendMessage(chatId, "🖼 Генерирую...");
 
-  try {
-    const img = await generateImage(prompt);
-    if (img.type === "url") {
-      await bot.sendPhoto(chatId, img.value, { caption: `Готово ✅ (осталось сегодня: ${lim.left})` });
-    } else {
-      const buf = Buffer.from(img.value, "base64");
-      await bot.sendPhoto(chatId, buf, { caption: `Готово ✅ (осталось сегодня: ${lim.left})` });
-    }
-  } catch (e) {
-    console.error("generateImage error:", e?.message || e);
-    await bot.sendMessage(chatId, "Не получилось сгенерировать картинку. Попробуй другой запрос.");
+ try {
+  const buf = await generateVideoToBuffer({ prompt, seconds, model: "sora-2" });
+  const fixedBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  // отправка mp4...
+} catch (e) {
+  const msg = String(e?.message || e);
+
+  if (msg.toLowerCase().includes("moderation") || msg.toLowerCase().includes("blocked")) {
+    // ВАЖНО: лимит НЕ списываем
+    await bot.sendMessage(chatId,
+      "⛔ Запрос на видео заблокирован модерацией.\n" +
+      "Попробуй переформулировать без 18+, жестокости, оружия, наркотиков, хейта и без реальных людей.\n\n" +
+      "Пример: /video милый кот пьет кофе в неоновом городе, мульт-стиль"
+    );
+    return;
   }
+
+  await bot.sendMessage(chatId, "❌ Ошибка генерации видео: " + msg);
+}
 }
 
 async function handleVideoPrompt({ msg, prompt }) {
