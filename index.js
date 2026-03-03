@@ -125,6 +125,53 @@ async function ffmpegFaststart(inPath) {
   return outPath;
 }
 
+async function ffprobeDurationSeconds(filePath) {
+  return await new Promise((resolve, reject) => {
+    let out = "";
+    const p = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ]);
+    p.stdout.on("data", (d) => (out += d.toString("utf8")));
+    p.on("error", reject);
+    p.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`ffprobe failed: ${code}`));
+      const dur = parseFloat(String(out).trim());
+      resolve(Number.isFinite(dur) ? dur : 0);
+    });
+  });
+}
+
+async function ffmpegPadToSeconds(inPath, targetSeconds = 4) {
+  const dur = await ffprobeDurationSeconds(inPath).catch(() => 0);
+  if (dur >= targetSeconds || dur <= 0) return inPath;
+
+  const delta = Math.max(0, targetSeconds - dur);
+  const outPath = inPath.replace(/\.mp4$/i, "") + `_pad${targetSeconds}.mp4`;
+
+  await new Promise((resolve, reject) => {
+    const args = [
+      "-y",
+      "-i", inPath,
+      "-vf", `tpad=stop_mode=clone:stop_duration=${delta}`,
+      "-af", `apad=pad_dur=${delta}`,
+      "-t", String(targetSeconds),
+      "-c:v", "libx264",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-movflags", "+faststart",
+      outPath,
+    ];
+    const p = spawn("ffmpeg", args, { stdio: "ignore" });
+    p.on("error", reject);
+    p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg pad failed: ${code}`))));
+  });
+
+  return outPath;
+}
+
 // ------------------ D-ID API ------------------
 
 function didAuthHeader() {
