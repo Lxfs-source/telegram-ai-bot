@@ -6,6 +6,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 const TelegramBot = require("node-telegram-bot-api");
 
 const { webSearch } = require("./search");
@@ -21,7 +22,6 @@ const {
   getUser,
   setPersonality,
   setCustomPersonality,
-  isPremium, // не используем в UI, но оставляем если где-то нужно
   addMessage,
   getLastMessages,
   // credits
@@ -51,21 +51,16 @@ const DID_API_KEY = process.env.DID_API_KEY || "";
 const DID_VOICE_PROVIDER = process.env.DID_VOICE_PROVIDER || "microsoft";
 const DID_VOICE_ID = process.env.DID_VOICE_ID || "en-US-JennyNeural";
 
-// Стоимости в кредитах
-const DID_COST = 1;            // D-ID: 1 кредит за ~4 сек (дешево)
-const SORA_COST_MULT = 10;     // Sora: 4 сек = 10 кредитов, 8 сек = 20, 12 сек = 30
+// Credit costs
+const DID_COST = 1;         // D-ID: 1 credit per ~4s (cheap)
+const SORA_COST_MULT = 10;  // Sora: 4s=10, 8s=20, 12s=30
 
-// Пакеты кредитов (Stars). Меняй под себя:
+// Credit packs (Stars). Adjust as needed:
 const CREDIT_PACKS = [
   { id: "pack50", credits: 50, priceXTR: parseInt(process.env.CREDITS50_PRICE_XTR || "299", 10) },
   { id: "pack110", credits: 110, priceXTR: parseInt(process.env.CREDITS110_PRICE_XTR || "599", 10) },
   { id: "pack250", credits: 250, priceXTR: parseInt(process.env.CREDITS250_PRICE_XTR || "1199", 10) },
 ];
-
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map((s) => parseInt(s.trim(), 10))
-  .filter((n) => Number.isFinite(n));
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
@@ -75,10 +70,6 @@ function tmpFile(name) {
   const dir = path.join(process.cwd(), "tmp");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, name);
-}
-
-function sha1(s) {
-  return crypto.createHash("sha1").update(String(s)).digest("hex");
 }
 
 function parseSecondsAndPrompt(raw) {
@@ -119,6 +110,19 @@ function minimalStartText(credits) {
     "/buy — купить кредиты",
     "/personality — выбор стиля общения",
   ].join("\n");
+}
+
+async function ffmpegFaststart(inPath) {
+  // Repack MP4 so Telegram clients read duration/audio correctly (moov atom at start)
+  const outPath = inPath.replace(/\.mp4$/i, "") + "_fs.mp4";
+  await new Promise((resolve, reject) => {
+    const p = spawn("ffmpeg", ["-y", "-i", inPath, "-c", "copy", "-movflags", "+faststart", outPath], {
+      stdio: "ignore",
+    });
+    p.on("error", reject);
+    p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg failed: ${code}`))));
+  });
+  return outPath;
 }
 
 // ------------------ D-ID API ------------------
@@ -173,6 +177,9 @@ async function didCreateTalk({ sourceUrl, text }) {
         voice_id: DID_VOICE_ID,
       },
     },
+    config: {
+      stitch: true,
+    },
   };
 
   const res = await fetch("https://api.d-id.com/talks", {
@@ -190,7 +197,7 @@ async function didCreateTalk({ sourceUrl, text }) {
   return json.id;
 }
 
-async function didWaitForResult(talkId, { timeoutMs = 90000 } = {}) {
+async function didWaitForResult(talkId, { timeoutMs = 180000 } = {}) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const res = await fetch(`https://api.d-id.com/talks/${talkId}`, {
@@ -212,17 +219,31 @@ async function didWaitForResult(talkId, { timeoutMs = 90000 } = {}) {
 
 async function downloadToBuffer(url) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
   const ab = await res.arrayBuffer();
-  return Buffer.from(ab);
+  const buf = Buffer.from(ab);
+
+  if (!res.ok) {
+    const preview = buf.slice(0, 400).toString("utf8");
+    throw new Error(`Download failed: ${res.status} ct=${ct} body=${preview}`);
+  }
+
+  // If D-ID returns HTML/JSON on edge cases, don't treat it as mp4
+  const looksLikeVideo = ct.startsWith("video/") || ct.includes("mp4") || ct.includes("octet-stream");
+  if (!looksLikeVideo || buf.length < 200_000) {
+    const preview = buf.slice(0, 400).toString("utf8");
+    throw new Error(`Non-video response: ct=${ct} bytes=${buf.length} body=${preview}`);
+  }
+
+  return buf;
 }
 
 // ------------------ STATE ------------------
 
-const awaitingAnimPhoto = new Map(); // userId -> { text }
-const pendingVideoConfirm = new Map(); // token -> { userId, chatId, prompt, seconds, creditsNeeded }
+const awaitingAnimPhoto = new Map();      // userId -> { text }
+const pendingVideoConfirm = new Map();    // token -> request
 
-// ------------------ COMMAND MENU (Telegram) ------------------
+// ------------------ COMMAND MENU ------------------
 
 (async () => {
   try {
@@ -246,7 +267,7 @@ bot.onText(/^\/start(@\w+)?$/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
-  const user = getUser(userId); // тут в database.js уже выдаётся стартовый кредит (SIGNUP_VIDEO_CREDITS)
+  getUser(userId); // ensures row exists + signup credits handled in database.js
   const credits = getCredits(userId);
 
   const kb = {
@@ -275,7 +296,7 @@ async function sendStore(chatId, userId) {
     `Баланс: ${credits.total} (месячные: ${credits.monthly}, купленные: ${credits.purchased})`,
     "",
     "Пакеты:",
-    ...CREDIT_PACKS.map((p) => `• +${p.credits} кредитов — ${p.priceXTR} Stars`),
+    ...CREDIT_PACKS.map((p) => `• +${p.credits} — ${p.priceXTR} Stars`),
     "",
     "Расход:",
     `• D-ID: ${DID_COST} кредит`,
@@ -295,12 +316,8 @@ bot.onText(/^\/buy(@\w+)?$/, async (msg) => {
   await sendStore(msg.chat.id, msg.from.id);
 });
 
-// Stars invoice helper
 async function sendStarsInvoice(chatId, userId, pack) {
-  // node-telegram-bot-api sendInvoice
-  // provider_token for Stars can be empty string; Telegram handles it
   const payload = `credits:${pack.id}:${userId}:${Date.now()}`;
-
   await bot.sendInvoice(chatId, {
     title: `Blinksy: +${pack.credits} кредитов`,
     description: `Пакет кредитов +${pack.credits}`,
@@ -311,7 +328,6 @@ async function sendStarsInvoice(chatId, userId, pack) {
   });
 }
 
-// Pre-checkout
 bot.on("pre_checkout_query", async (q) => {
   try {
     await bot.answerPreCheckoutQuery(q.id, true);
@@ -320,22 +336,20 @@ bot.on("pre_checkout_query", async (q) => {
   }
 });
 
-// Successful payment (Stars)
 bot.on("message", async (msg) => {
-  // payment
+  // successful payment handler
   if (msg.successful_payment) {
     const sp = msg.successful_payment;
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
     try {
-      // защита от дублей
-      if (isPaymentProcessed(sp.provider_payment_charge_id || sp.telegram_payment_charge_id || sp.invoice_payload)) {
+      const key = sp.provider_payment_charge_id || sp.telegram_payment_charge_id || sp.invoice_payload;
+      if (isPaymentProcessed(key)) {
         await bot.sendMessage(chatId, "Платёж уже обработан.");
         return;
       }
 
-      // parse payload
       const payload = sp.invoice_payload || "";
       const parts = payload.split(":");
       const packId = parts[1] || "";
@@ -347,7 +361,7 @@ bot.on("message", async (msg) => {
       }
 
       addPurchasedCredits(userId, pack.credits);
-      recordPayment(sp.provider_payment_charge_id || sp.telegram_payment_charge_id || payload);
+      recordPayment(key);
 
       const after = getCredits(userId);
       await bot.sendMessage(chatId, `Готово. Баланс: ${after.total}`);
@@ -368,7 +382,6 @@ bot.onText(/^\/personality(@\w+)?$/, async (msg) => {
     inline_keyboard: [
       [{ text: "Default", callback_data: "pers:default" }, { text: "Friendly", callback_data: "pers:friendly" }],
       [{ text: "Strict", callback_data: "pers:strict" }, { text: "Funny", callback_data: "pers:funny" }],
-      [{ text: "Custom", callback_data: "pers:custom" }],
     ],
   };
 
@@ -386,7 +399,6 @@ bot.onText(/^\/custom_off(@\w+)?$/, async (msg) => {
 
 bot.onText(/^\/image(@\w+)?\s+([\s\S]+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
   const prompt = (match?.[2] || "").trim();
   if (!prompt) return;
 
@@ -492,13 +504,8 @@ bot.on("callback_query", async (q) => {
 
     if (data.startsWith("pers:")) {
       const p = data.split(":")[1];
-      if (p === "custom") {
-        setCustomPersonality(userId, ""); // пользователь сам задаст позже (если добавишь /custom)
-        await bot.sendMessage(chatId, "Custom стиль: пока отключено. (Можно добавить позже)");
-      } else {
-        setPersonality(userId, p);
-        await bot.sendMessage(chatId, `Стиль выбран: ${p}`);
-      }
+      setPersonality(userId, p);
+      await bot.sendMessage(chatId, `Стиль выбран: ${p}`);
       return;
     }
 
@@ -506,8 +513,6 @@ bot.on("callback_query", async (q) => {
       const id = data.split(":")[1];
       const pack = CREDIT_PACKS.find((p) => p.id === id);
       if (!pack) return;
-
-      // Stars invoice
       await sendStarsInvoice(chatId, userId, pack);
       return;
     }
@@ -553,8 +558,10 @@ bot.on("callback_query", async (q) => {
         const outPath = tmpFile(`sora_${chatId}_${Date.now()}.mp4`);
         fs.writeFileSync(outPath, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
 
+        // Send as document to avoid Telegram client duration glitches
+        const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
         const after = getCredits(userId);
-        await bot.sendVideo(chatId, outPath, { caption: `Готово.\nБаланс: ${after.total}` });
+        await bot.sendDocument(chatId, fixed, { caption: `Готово.\nБаланс: ${after.total}` });
       } catch (e) {
         console.log("Sora error:", e?.message || e);
         refundVideoCredits(userId, consumed.usedMonthly, consumed.usedPurchased);
@@ -593,7 +600,6 @@ bot.on("photo", async (msg) => {
     return;
   }
 
-  // choose best size
   const photo = (msg.photo || []).slice(-1)[0];
   if (!photo?.file_id) {
     awaitingAnimPhoto.delete(userId);
@@ -601,7 +607,6 @@ bot.on("photo", async (msg) => {
     return;
   }
 
-  // списываем 1 кредит (D-ID)
   const consumed = consumeVideoCredits(userId, DID_COST);
   if (!consumed.ok) {
     awaitingAnimPhoto.delete(userId);
@@ -614,7 +619,12 @@ bot.on("photo", async (msg) => {
   await bot.sendMessage(chatId, "Генерирую анимацию (D-ID)...");
 
   try {
-    const localPath = await downloadTelegramFile(bot, photo.file_id, tmpFile(`did_${chatId}_${Date.now()}.jpg`));
+    const localPath = await downloadTelegramFile(
+      bot,
+      photo.file_id,
+      tmpFile(`did_${chatId}_${Date.now()}.jpg`)
+    );
+
     const sourceUrl = await didUploadImage(localPath);
     const talkId = await didCreateTalk({ sourceUrl, text: pending.text });
     const resultUrl = await didWaitForResult(talkId);
@@ -623,8 +633,11 @@ bot.on("photo", async (msg) => {
     const outPath = tmpFile(`did_out_${chatId}_${Date.now()}.mp4`);
     fs.writeFileSync(outPath, buf);
 
+    // Fix mp4 metadata + send as document to preserve audio/duration in Telegram clients
+    const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
+
     const after = getCredits(userId);
-    await bot.sendVideo(chatId, outPath, { caption: `Готово.\nБаланс: ${after.total}` });
+    await bot.sendDocument(chatId, fixed, { caption: `Готово.\nБаланс: ${after.total}` });
   } catch (e) {
     console.log("D-ID error:", e?.message || e);
     refundVideoCredits(userId, consumed.usedMonthly, consumed.usedPurchased);
@@ -638,18 +651,14 @@ bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
-  // ignore commands, payments, photo (handled elsewhere)
   const text = msg.text || msg.caption || "";
   if (!text || text.startsWith("/")) return;
   if (msg.successful_payment) return;
-
-  // если пользователь ждёт фото для /anim — не отвечаем текстом
   if (awaitingAnimPhoto.has(userId)) return;
 
   const user = getUser(userId);
 
   try {
-    // опциональный websearch
     let useSearch = false;
     try {
       useSearch = await decideSearch(text);
@@ -680,7 +689,7 @@ bot.on("message", async (msg) => {
   }
 });
 
-// ------------------ LOGS ------------------
+// ------------------ BOOT ------------------
 
 bot.getMe()
   .then((me) => console.log("Bot started:", me.username, me.id))
