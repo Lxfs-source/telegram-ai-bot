@@ -455,6 +455,12 @@ bot.onText(/^\/image(@\w+)?\s+([\s\S]+)$/i, async (msg, match) => {
     const buf = await generateImage({ prompt });
     const outPath = tmpFile(`img_${chatId}_${Date.now()}.png`);
     fs.writeFileSync(outPath, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+
+    const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
+
+const after = getCredits(userId);
+await bot.sendDocument(chatId, fixed, { caption: `Готово.\nБаланс: ${after.total}` });
+
     await bot.sendPhoto(chatId, outPath, { caption: "Готово." });
   } catch (e) {
     console.log("image error:", e?.message || e);
@@ -604,6 +610,11 @@ bot.on("callback_query", async (q) => {
 
         const outPath = tmpFile(`sora_${chatId}_${Date.now()}.mp4`);
         fs.writeFileSync(outPath, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+
+        let finalPath = await ffmpegPadToSeconds(outPath, 4).catch(() => outPath);
+
+// 2) на всякий случай faststart ещё раз
+finalPath = await ffmpegFaststart(finalPath).catch(() => finalPath);
 
         // Send as document to avoid Telegram client duration glitches
         const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
