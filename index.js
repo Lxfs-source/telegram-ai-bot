@@ -5,12 +5,65 @@ const db = require("./database");
 const path = require("path");
 const fs = require("fs");
 const TelegramBot = require("node-telegram-bot-api");
+
 const PREMIUM_PRICE_XTR = parseInt(process.env.PREMIUM_PRICE_XTR || "299", 10);
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || "30", 10);
 
 const PRO_CREDITS_MONTHLY = parseInt(process.env.PRO_CREDITS_MONTHLY || "12", 10);
 const PROPLUS_PRICE_XTR = parseInt(process.env.PROPLUS_PRICE_XTR || "599", 10);
 const PROPLUS_CREDITS_MONTHLY = parseInt(process.env.PROPLUS_CREDITS_MONTHLY || "30", 10);
+// 1️⃣ если fetch нет — добавь:
+const fetch = global.fetch ? global.fetch : require("node-fetch");
+
+// 2️⃣ конфиг D-ID
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_VOICE_PROVIDER = process.env.DID_VOICE_PROVIDER || "microsoft";
+const DID_VOICE_ID = process.env.DID_VOICE_ID || "en-US-JennyNeural";
+
+function didAuthHeader() {
+  if (!DID_API_KEY) throw new Error("DID_API_KEY is not set");
+  return `Basic ${Buffer.from(DID_API_KEY + ":").toString("base64")}`;
+}
+
+async function didUploadImage(imagePath) {
+  const buf = fs.readFileSync(imagePath);
+  const ext = path.extname(imagePath).toLowerCase();
+  const mime = ext === ".png" ? "image/png" : "image/jpeg";
+
+  const boundary = "----blinksy_" + Math.random().toString(16).slice(2);
+  const filename = path.basename(imagePath).slice(0, 50);
+
+  const head =
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="image"; filename="${filename}"\r\n` +
+    `Content-Type: ${mime}\r\n\r\n`;
+  const tail = `\r\n--${boundary}--\r\n`;
+
+  const body = Buffer.concat([
+    Buffer.from(head, "utf8"),
+    buf,
+    Buffer.from(tail, "utf8"),
+  ]);
+
+  const res = await fetch("https://api.d-id.com/images", {
+    method: "POST",
+    headers: {
+      Authorization: didAuthHeader(),
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`D-ID image upload failed: ${res.status} ${JSON.stringify(json)}`);
+  }
+
+  const url = json.url || json.source_url || json.image_url;
+  if (!url) throw new Error("D-ID image upload: no url in response");
+
+  return url;
+}
 
 const CREDIT_PACKS = [
   { id: "pack50", credits: 50, priceXTR: parseInt(process.env.CREDITS50_PRICE_XTR || "299", 10) },
@@ -656,98 +709,7 @@ function didAuthHeader() {
   return `Basic ${DID_API_KEY}`;
 }
 
-async function didUploadImage(imagePath) {
-  if (!DID_API_KEY) throw new Error("DID_API_KEY is not set");
 
-  const buf = fs.readFileSync(imagePath);
-  const ext = path.extname(imagePath).toLowerCase();
-  const mime = ext === ".png" ? "image/png" : "image/jpeg";
-
-  const boundary = "----blinksy_" + Math.random().toString(16).slice(2);
-  const filename = path.basename(imagePath).slice(0, 50);
-
-  const head =
-    `--${boundary}\r\n` +
-    `Content-Disposition: form-data; name="image"; filename="${filename}"\r\n` +
-    `Content-Type: ${mime}\r\n\r\n`;
-  const tail = `\r\n--${boundary}--\r\n`;
-
-  const body = Buffer.concat([Buffer.from(head, "utf8"), buf, Buffer.from(tail, "utf8")]);
-
-  const res = await fetch("https://api.d-id.com/images", {
-    method: "POST",
-    headers: {
-      Authorization: didAuthHeader(),
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
-    },
-    body,
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`D-ID image upload failed: ${res.status} ${JSON.stringify(json)}`);
-  }
-
-  const url = json.url || json.source_url || json.image_url;
-  if (!url) {
-    throw new Error(`D-ID image upload: no url in response: ${JSON.stringify(json)}`);
-  }
-  return url;
-}
-
-async function didCreateTalk({ sourceUrl, text }) {
-  const payload = {
-    source_url: sourceUrl,
-    script: {
-      type: "text",
-      input: text,
-      provider: {
-        type: DID_VOICE_PROVIDER,
-        voice_id: DID_VOICE_ID,
-      },
-    },
-  };
-
-  const res = await fetch("https://api.d-id.com/talks", {
-    method: "POST",
-    headers: {
-      Authorization: didAuthHeader(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`D-ID create talk failed: ${res.status} ${JSON.stringify(json)}`);
-  }
-  if (!json.id) throw new Error(`D-ID create talk: missing id: ${JSON.stringify(json)}`);
-  return json.id;
-}
-
-async function didWaitForResult(talkId, { timeoutMs = 60000 } = {}) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const res = await fetch(`https://api.d-id.com/talks/${talkId}`, {
-      method: "GET",
-      headers: { Authorization: didAuthHeader() },
-    });
-
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(`D-ID get talk failed: ${res.status} ${JSON.stringify(json)}`);
-    }
-
-    const status = String(json.status || "");
-    if (status === "done" && json.result_url) return json.result_url;
-    if (status === "error" || status === "failed") {
-      throw new Error(`D-ID talk failed: ${JSON.stringify(json)}`);
-    }
-
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  throw new Error("D-ID timeout");
-}
 
 async function downloadToBuffer(url) {
   const res = await fetch(url);
