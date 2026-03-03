@@ -111,6 +111,13 @@ if (!userCols2.includes("credits_purchased")) {
   db.prepare("ALTER TABLE users ADD COLUMN credits_purchased INTEGER DEFAULT 0").run();
 }
 
+
+// --- migration: one free D-ID video on registration ---
+const userCols3 = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+if (!userCols3.includes("did_free_used")) {
+  db.prepare("ALTER TABLE users ADD COLUMN did_free_used INTEGER DEFAULT 0").run();
+}
+
 // migration safety: ensure payments table exists in older dbs
 // (CREATE TABLE IF NOT EXISTS already covers it)
 // ---------------- helpers ----------------
@@ -184,7 +191,7 @@ function getUser(userId) {
   
 if (!user) {
     // New user: give a small one-time signup video credit (safe by global limit)
-    const SIGNUP_CREDITS = parseInt(process.env.SIGNUP_VIDEO_CREDITS || "1", 10);
+    const SIGNUP_CREDITS = parseInt(process.env.SIGNUP_VIDEO_CREDITS || "0", 10);
     const GLOBAL_LIMIT = parseInt(process.env.SIGNUP_VIDEO_CREDITS_GLOBAL_LIMIT || "50", 10); // 0 = unlimited
     let give = Math.max(0, SIGNUP_CREDITS);
 
@@ -203,9 +210,10 @@ if (!user) {
         custom_personality,
         voice_key,
         premium_tier,
-        credits_purchased
+        credits_purchased,
+        did_free_used
       )
-      VALUES (?, 0, 0, 'text', 'default', '', 'alloy', 'none', ?)
+      VALUES (?, 0, 0, 'text', 'default', '', 'alloy', 'none', ?, 0)
     `).run(userId, give);
 
     if (give > 0) {
@@ -301,7 +309,7 @@ function ensureMonthlyCredits(userId) {
     premiumActive && tier === "proplus" ? 30 :
     premiumActive && tier === "pro" ? 12 :
     premiumActive ? 12 : // fallback
-    1; // free marketing credit per month
+    0; // no free monthly credits
 
   db.prepare(`
     UPDATE users
@@ -316,6 +324,16 @@ function getCredits(userId) {
   const monthly = row.credits_monthly || 0;
   const purchased = row.credits_purchased || 0;
   return { monthly, purchased, total: monthly + purchased };
+}
+
+
+function hasFreeDid(userId) {
+  const row = db.prepare("SELECT did_free_used FROM users WHERE user_id = ?").get(userId);
+  return (row?.did_free_used || 0) === 0;
+}
+
+function markFreeDidUsed(userId) {
+  db.prepare("UPDATE users SET did_free_used = 1 WHERE user_id = ?").run(userId);
 }
 
 // consume N video credits (monthly first, then purchased)
@@ -507,6 +525,8 @@ module.exports = {
     consumeVideoCredits,
     refundVideoCredits,
     addPurchasedCredits,
+    hasFreeDid,
+    markFreeDidUsed,
 
     // payments
     isPaymentProcessed,

@@ -13,9 +13,9 @@ const PROPLUS_PRICE_XTR = parseInt(process.env.PROPLUS_PRICE_XTR || "599", 10);
 const PROPLUS_CREDITS_MONTHLY = parseInt(process.env.PROPLUS_CREDITS_MONTHLY || "30", 10);
 
 const CREDIT_PACKS = [
-  { id: "pack5", credits: 5, priceXTR: parseInt(process.env.CREDITS5_PRICE_XTR || "59", 10) },
-  { id: "pack15", credits: 15, priceXTR: parseInt(process.env.CREDITS15_PRICE_XTR || "149", 10) },
-  { id: "pack40", credits: 40, priceXTR: parseInt(process.env.CREDITS40_PRICE_XTR || "349", 10) },
+  { id: "pack50", credits: 50, priceXTR: parseInt(process.env.CREDITS50_PRICE_XTR || "299", 10) },
+  { id: "pack110", credits: 110, priceXTR: parseInt(process.env.CREDITS110_PRICE_XTR || "599", 10) },
+  { id: "pack250", credits: 250, priceXTR: parseInt(process.env.CREDITS250_PRICE_XTR || "1199", 10) },
 ];
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || "")
@@ -59,6 +59,8 @@ const {
   consumeVideoCredits,
   refundVideoCredits,
   addPurchasedCredits,
+  hasFreeDid,
+  markFreeDidUsed,
   isPaymentProcessed,
   recordPayment,
   // cache
@@ -104,67 +106,59 @@ function looksCyrillicOrArmenian(text) {
 
 const I18N = {
   ru: {
-    balanceFull: (c, premLine) => `🎟️ Кредиты: ${c.total} (месячные: ${c.monthly}, купленные: ${c.purchased})\n${premLine}`,
-    premiumOff: "💎 Premium: нет",
-    premiumOn: (tier, until) => `💎 Premium: ${tier} (до ${until})`,
-    tierPro: "PRO",
-    tierProPlus: "PRO+",
-    noCredits: "❌ Кредиты закончились. Напиши /buy чтобы купить.",
-    buyTitle: "🛒 Магазин",
-    buyPick: "Выбери что купить:",
-    buyDetails: (proPrice, proDays, proCredits, proPlusPrice, proPlusDays, proPlusCredits, packsText) =>
-`Тарифы (Stars):\n\n⭐ PRO — ${proPrice} XTR / ${proDays} дней\n• ${proCredits} кредитов/мес\n\n✨ PRO+ — ${proPlusPrice} XTR / ${proPlusDays} дней\n• ${proPlusCredits} кредитов/мес\n\nПакеты кредитов:\n${packsText}\n\nℹ️ 1 кредит = 1 видео на 4 секунды\n8 сек = 2 кредита, 12 сек = 3 кредита`,
-    proDesc: (days, c) => `Premium PRO на ${days} дней + ${c} кредитов/мес`,
-    proplusDesc: (days, c) => `Premium PRO+ на ${days} дней + ${c} кредитов/мес`,
-    packDesc: (n) => `Пакет кредитов: +${n}`,
-    payNotSupported: "Не смог выставить счёт. Проверь, что бот поддерживает оплаты Stars.",
-    scanSendPhotoDetect: "📷 Отправь фото — скажу кто/что на нём.",
-    scanSendPhotoText: "📷 Отправь фото — верну текст точь-в-точь.",
-    scanNoText: "Текст не найден.",
-    lengthPick: "Выбери длину ответов:",
-    lengthConcise: "Только по делу",
-    lengthNormal: "Обычно",
-    queued: "⏳ Поставил в очередь.",
-    tooManyQueued: "❌ Слишком много задач. Подожди пока выполнится.",
-    cooldown: "⏳ Слишком часто. Подожди немного.",
-    adminOnly: "❌ Только для админа.",
-    adminHelp:
-`/givepremium USER_ID DAYS
-/givecredits USER_ID AMOUNT
-/setlang USER_ID ru|en
-/stats`,
+    balanceFull: (c) => `Кредиты: ${c.total} (купленные: ${c.purchased})`,
+    noCredits: "Недостаточно кредитов. /buy",
+    buyTitle: "Магазин",
+    buyPick: "Выбери пакет:",
+    buyDetails: (packsText) =>
+`Пакеты кредитов (Stars):
+${packsText}
+
+Тарифы:
+• D-ID (анимация фото, ~4с): 2 кредита
+• Sora 2 (видео): 10 кредитов за 4с (8с = 20, 12с = 30)`,
+    packDesc: (n) => `Пакет: +${n} кредитов`,
+    payNotSupported: "Не удалось выставить счёт. Проверь Stars в Telegram.",
+    queued: "В очереди.",
+    tooManyQueued: "Слишком много задач. Подожди.",
+    cooldown: "Слишком часто. Подожди немного.",
+    adminOnly: "Только для админа.",
+    help:
+`Команды:
+• /anim <текст> — анимация фото через D-ID (нужна фотография)
+• /video <сек> <промт> — видео через Sora 2 (4/8/12 сек)
+• /balance — баланс кредитов
+• /buy — купить кредиты
+• /mask — выбрать личность
+• /clear — очистить память`,
   },
   en: {
-    balanceFull: (c, premLine) => `🎟️ Credits: ${c.total} (monthly: ${c.monthly}, purchased: ${c.purchased})\n${premLine}`,
-    premiumOff: "💎 Premium: no",
-    premiumOn: (tier, until) => `💎 Premium: ${tier} (until ${until})`,
-    tierPro: "PRO",
-    tierProPlus: "PRO+",
-    noCredits: "❌ No credits left. Use /buy to purchase.",
-    buyTitle: "🛒 Store",
-    buyPick: "Choose a purchase:",
-    buyDetails: (proPrice, proDays, proCredits, proPlusPrice, proPlusDays, proPlusCredits, packsText) =>
-`Plans (Stars):\n\n⭐ PRO — ${proPrice} XTR / ${proDays} days\n• ${proCredits} credits/month\n\n✨ PRO+ — ${proPlusPrice} XTR / ${proPlusDays} days\n• ${proPlusCredits} credits/month\n\nCredit packs:\n${packsText}\n\nℹ️ 1 credit = 1 video (4 seconds)\n8s = 2 credits, 12s = 3 credits`,
-    proDesc: (days, c) => `Premium PRO for ${days} days + ${c} credits/month`,
-    proplusDesc: (days, c) => `Premium PRO+ for ${days} days + ${c} credits/month`,
-    packDesc: (n) => `Credit pack: +${n}`,
-    payNotSupported: "Couldn't create an invoice. Make sure Stars payments are supported.",
-    scanSendPhotoDetect: "📷 Send a photo — I'll identify who/what is on it.",
-    scanSendPhotoText: "📷 Send a photo — I'll extract the text exactly.",
-    scanNoText: "No text found.",
-    lengthPick: "Choose response length:",
-    lengthConcise: "Concise",
-    lengthNormal: "Normal",
-    queued: "⏳ Added to queue.",
-    tooManyQueued: "❌ Too many tasks queued. Please wait.",
-    cooldown: "⏳ Too fast. Please wait a bit.",
-    adminOnly: "❌ Admin only.",
-    adminHelp:
-`/givepremium USER_ID DAYS
-/givecredits USER_ID AMOUNT
-/setlang USER_ID ru|en
-/stats`,
-  }
+    balanceFull: (c) => `Credits: ${c.total} (purchased: ${c.purchased})`,
+    noCredits: "Not enough credits. /buy",
+    buyTitle: "Store",
+    buyPick: "Choose a pack:",
+    buyDetails: (packsText) =>
+`Credit packs (Stars):
+${packsText}
+
+Rates:
+• D-ID (photo animation, ~4s): 2 credits
+• Sora 2 (video): 10 credits per 4s (8s = 20, 12s = 30)`,
+    packDesc: (n) => `Pack: +${n} credits`,
+    payNotSupported: "Couldn't create an invoice. Check Telegram Stars.",
+    queued: "Queued.",
+    tooManyQueued: "Too many tasks. Please wait.",
+    cooldown: "Too fast. Please wait.",
+    adminOnly: "Admin only.",
+    help:
+`Commands:
+• /anim <text> — photo animation via D-ID (send a photo)
+• /video <sec> <prompt> — video via Sora 2 (4/8/12 sec)
+• /balance — credits balance
+• /buy — buy credits
+• /mask — choose personality
+• /clear — clear memory`,
+  },
 };
 
 function t(user, key, ...args) {
@@ -243,6 +237,8 @@ async function setupBotCommands() {
 const awaitingCustom = new Map(); // userId -> true
 const awaitingImage = new Map();  // userId -> true
 const awaitingVideo = new Map();  // userId -> true
+
+const awaitingAnim = new Map();   // userId -> { text }
 
 // pending video confirmations: token -> { userId, chatId, prompt, seconds, creditsNeeded, hash }
 const pendingVideoConfirm = new Map();
@@ -414,7 +410,7 @@ ${BASE_SYSTEM}
   },
 
   punk: {
-    title: "⚡ Панк",
+    title: " Панк",
     system: `
 ${BASE_SYSTEM}
 Ты панк. Бунтарь. Режешь правду. Ненавидишь бюрократию.
@@ -454,37 +450,31 @@ const MASK_PHRASES = [
 ];
 
 function startText(user, credits) {
-  const premium = isPremium(user);
-  const totalCredits = credits?.total ?? 0;
+  const total = credits?.total ?? 0;
 
-  const lines = [
-    "👋 Привет! Я Многоликий Степан — AI-бот с видео, картинками и голосом.",
+  return [
+    "Blinksy",
     "",
-    `🎁 Стартовый бонус: 1 кредит на видео (4 сек) новым пользователям.`,
-    `💳 Ваши кредиты видео: ${totalCredits} (месячные: ${credits?.monthly ?? 0}, купленные: ${credits?.purchased ?? 0})`,
+    "AI-диалоги, личности и генерация видео.",
     "",
-    "Что можно сделать прямо сейчас:",
-    "• 🎬 Видео: /video 4 кот на мотоцикле в неоне",
-    "• 🖼 Картинка: /image киберпанк город, закат",
-    "• 💬 Просто напиши сообщение — отвечу как чат",
+    "Доступно при регистрации:",
+    "• 1 бесплатная анимация фото (D-ID)",
     "",
-    "Важно про видео:",
-    "• 4 сек = 1 кредит, 8 сек = 2, 12 сек = 3",
-    "• Перед генерацией я прошу подтверждение (чтобы не тратить кредиты случайно)",
-    "• Если такой запрос уже делали — могу отдать из кэша без списания",
+    "Тарифы:",
+    "• D-ID (анимация фото, ~4с): 2 кредита",
+    "• Sora 2 (видео): 10 кредитов за 4с (8с = 20, 12с = 30)",
     "",
-    premium ? `✅ Premium активен до: ${formatDateTime(user.premium_until)}` : "⭐ Premium не активен (можно купить в магазине).",
-    "Команды: /personality /text /voice /custom /custom_off /premium",
-  ];
-
-  return lines.join("\n");
+    `Баланс: ${total} кредитов`,
+    "",
+    "Команды: /anim, /video, /buy, /balance, /mask",
+  ].join("\n");
 }
 async function sendStore(chatId, userId) {
   const user = getUser(userId);
   const credits = getCredits(userId);
 
   const lines = [
-    "⭐ Магазин",
+    " Магазин",
     "",
     `Ваши кредиты видео: ${credits.total} (месячные: ${credits.monthly}, купленные: ${credits.purchased})`,
     "",
@@ -494,19 +484,19 @@ async function sendStore(chatId, userId) {
   const kb = {
     inline_keyboard: [
       [
-        { text: `Premium PRO (${PRO_CREDITS_MONTHLY}/мес) — ${PREMIUM_PRICE_XTR}⭐`, callback_data: "buy:pro" },
+        { text: `Premium PRO (${PRO_CREDITS_MONTHLY}/мес) — ${PREMIUM_PRICE_XTR}`, callback_data: "buy:pro" },
       ],
       [
-        { text: `Premium PRO+ (${PROPLUS_CREDITS_MONTHLY}/мес) — ${PROPLUS_PRICE_XTR}⭐`, callback_data: "buy:proplus" },
+        { text: `Premium PRO+ (${PROPLUS_CREDITS_MONTHLY}/мес) — ${PROPLUS_PRICE_XTR}`, callback_data: "buy:proplus" },
       ],
       [
-        { text: `${CREDIT_PACKS[0].credits} видео-кредитов — ${CREDIT_PACKS[0].priceXTR}⭐`, callback_data: `buy:${CREDIT_PACKS[0].id}` },
+        { text: `${CREDIT_PACKS[0].credits} видео-кредитов — ${CREDIT_PACKS[0].priceXTR}`, callback_data: `buy:${CREDIT_PACKS[0].id}` },
       ],
       [
-        { text: `${CREDIT_PACKS[1].credits} видео-кредитов — ${CREDIT_PACKS[1].priceXTR}⭐`, callback_data: `buy:${CREDIT_PACKS[1].id}` },
+        { text: `${CREDIT_PACKS[1].credits} видео-кредитов — ${CREDIT_PACKS[1].priceXTR}`, callback_data: `buy:${CREDIT_PACKS[1].id}` },
       ],
       [
-        { text: `${CREDIT_PACKS[2].credits} видео-кредитов — ${CREDIT_PACKS[2].priceXTR}⭐`, callback_data: `buy:${CREDIT_PACKS[2].id}` },
+        { text: `${CREDIT_PACKS[2].credits} видео-кредитов — ${CREDIT_PACKS[2].priceXTR}`, callback_data: `buy:${CREDIT_PACKS[2].id}` },
       ],
     ],
   };
@@ -654,6 +644,118 @@ function tmpFile(name) {
   const dir = path.join(process.cwd(), "tmp");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, name);
+
+
+// ====== D-ID (photo animation) ======
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_VOICE_ID = process.env.DID_VOICE_ID || "en-US-JennyNeural"; // default from D-ID quickstart
+const DID_VOICE_PROVIDER = process.env.DID_VOICE_PROVIDER || "microsoft";
+
+function didAuthHeader() {
+  // D-ID uses Basic auth with the API key as the base64 value in the Authorization header (see quickstart).
+  return `Basic ${DID_API_KEY}`;
+}
+
+async function didUploadImage(imagePath) {
+  if (!DID_API_KEY) throw new Error("DID_API_KEY is not set");
+
+  const buf = fs.readFileSync(imagePath);
+  const ext = path.extname(imagePath).toLowerCase();
+  const mime = ext === ".png" ? "image/png" : "image/jpeg";
+
+  const boundary = "----blinksy_" + Math.random().toString(16).slice(2);
+  const filename = path.basename(imagePath).slice(0, 50);
+
+  const head =
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="image"; filename="${filename}"\r\n` +
+    `Content-Type: ${mime}\r\n\r\n`;
+  const tail = `\r\n--${boundary}--\r\n`;
+
+  const body = Buffer.concat([Buffer.from(head, "utf8"), buf, Buffer.from(tail, "utf8")]);
+
+  const res = await fetch("https://api.d-id.com/images", {
+    method: "POST",
+    headers: {
+      Authorization: didAuthHeader(),
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`D-ID image upload failed: ${res.status} ${JSON.stringify(json)}`);
+  }
+
+  const url = json.url || json.source_url || json.image_url;
+  if (!url) {
+    throw new Error(`D-ID image upload: no url in response: ${JSON.stringify(json)}`);
+  }
+  return url;
+}
+
+async function didCreateTalk({ sourceUrl, text }) {
+  const payload = {
+    source_url: sourceUrl,
+    script: {
+      type: "text",
+      input: text,
+      provider: {
+        type: DID_VOICE_PROVIDER,
+        voice_id: DID_VOICE_ID,
+      },
+    },
+  };
+
+  const res = await fetch("https://api.d-id.com/talks", {
+    method: "POST",
+    headers: {
+      Authorization: didAuthHeader(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`D-ID create talk failed: ${res.status} ${JSON.stringify(json)}`);
+  }
+  if (!json.id) throw new Error(`D-ID create talk: missing id: ${JSON.stringify(json)}`);
+  return json.id;
+}
+
+async function didWaitForResult(talkId, { timeoutMs = 60000 } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const res = await fetch(`https://api.d-id.com/talks/${talkId}`, {
+      method: "GET",
+      headers: { Authorization: didAuthHeader() },
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`D-ID get talk failed: ${res.status} ${JSON.stringify(json)}`);
+    }
+
+    const status = String(json.status || "");
+    if (status === "done" && json.result_url) return json.result_url;
+    if (status === "error" || status === "failed") {
+      throw new Error(`D-ID talk failed: ${JSON.stringify(json)}`);
+    }
+
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error("D-ID timeout");
+}
+
+async function downloadToBuffer(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
+
 }
 
 // ====== STARTUP LOGS ======
@@ -680,9 +782,10 @@ bot.onText(/^\/start(@\w+)?$/, async (msg) => {
 
   const keyboard = {
     inline_keyboard: [
-      [{ text: "🎬 Видео", callback_data: "action:video" }, { text: "🖼 Картинка", callback_data: "action:image" }],
-      [{ text: "⭐ Купить кредиты", callback_data: "action:store" }],
-      [{ text: "👤 Маска", callback_data: "action:personality" }, { text: "ℹ️ Помощь", callback_data: "action:help" }],
+      [{ text: "Анимация фото", callback_data: "action:anim" }, { text: "Видео (Sora 2)", callback_data: "action:video" }],
+      [{ text: "Картинка", callback_data: "action:image" }],
+      [{ text: "Купить кредиты", callback_data: "action:store" }],
+      [{ text: "Личность", callback_data: "action:personality" }, { text: "Помощь", callback_data: "action:help" }],
     ],
   };
 
@@ -699,7 +802,7 @@ bot.onText(/^\/custom_off(@\w+)?$/, async (msg) => {
   awaitingCustom.delete(userId);
   awaitingImage.delete(userId);
   awaitingVideo.delete(userId);
-  await bot.sendMessage(msg.chat.id, "✅ Кастомная маска выключена. Память очищена.");
+  await bot.sendMessage(msg.chat.id, " Кастомная маска выключена. Память очищена.");
 });
 
 bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
@@ -711,7 +814,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
 
   if (premium) {
     const until = user.premium_until;
-    await bot.sendMessage(chatId, `✅ Premium уже активирован.\nДействует до: ${formatDateTime(until)}`);
+    await bot.sendMessage(chatId, ` Premium уже активирован.\nДействует до: ${formatDateTime(until)}`);
     return;
   }
 
@@ -737,13 +840,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
 bot.onText(/^\/balance(@\w+)?$/, async (msg) => {
   const user = getUser(msg.from.id);
   const c = getCredits(msg.from.id);
-  const prem = isPremium(user);
-  let premLine = t(user, "premiumOff");
-  if (prem) {
-    const tier = (user.premium_tier || "pro").toLowerCase() === "proplus" ? t(user,"tierProPlus") : t(user,"tierPro");
-    premLine = t(user, "premiumOn", tier, formatDateTime(user.premium_until));
-  }
-  await bot.sendMessage(msg.chat.id, t(user, "balanceFull", c, premLine));
+  await bot.sendMessage(msg.chat.id, t(user, "balanceFull", c));
 });
 
 bot.onText(/^\/buy(@\w+)?$/, async (msg) => {
@@ -755,20 +852,9 @@ bot.onText(/^\/buy(@\w+)?$/, async (msg) => {
     .map((p) => `• +${p.credits} — ${p.priceXTR} XTR`)
     .join("\n");
 
-  const details = t(
-    user,
-    "buyDetails",
-    PREMIUM_PRICE_XTR,
-    PREMIUM_DAYS,
-    PRO_CREDITS_MONTHLY,
-    PROPLUS_PRICE_XTR,
-    PREMIUM_DAYS,
-    PROPLUS_CREDITS_MONTHLY,
-    packsText
-  );
+  const details = t(user, "buyDetails", packsText);
 
   const buttons = [
-    [{ text: "PRO", callback_data: "buy:pro" }, { text: "PRO+", callback_data: "buy:proplus" }],
     ...CREDIT_PACKS.map((p) => [{ text: `+${p.credits}`, callback_data: `buy:${p.id}` }]),
   ];
 
@@ -822,7 +908,7 @@ bot.onText(/^\/givepremium(@\w+)?\s+(\d+)\s+(\d+)$/, async (msg, m) => {
   if (!Number.isFinite(uid) || !Number.isFinite(days)) return;
   setPremium(uid, days);
   setPremiumTier(uid, "pro");
-  await bot.sendMessage(msg.chat.id, `✅ OK: premium ${uid} for ${days} days`);
+  await bot.sendMessage(msg.chat.id, ` OK: premium ${uid} for ${days} days`);
 });
 
 bot.onText(/^\/givecredits(@\w+)?\s+(\d+)\s+(\d+)$/, async (msg, m) => {
@@ -832,7 +918,7 @@ bot.onText(/^\/givecredits(@\w+)?\s+(\d+)\s+(\d+)$/, async (msg, m) => {
   const amount = parseInt(m[3], 10);
   if (!Number.isFinite(uid) || !Number.isFinite(amount)) return;
   addPurchasedCredits(uid, amount);
-  await bot.sendMessage(msg.chat.id, `✅ OK: +${amount} credits to ${uid}`);
+  await bot.sendMessage(msg.chat.id, ` OK: +${amount} credits to ${uid}`);
 });
 
 bot.onText(/^\/setlang(@\w+)?\s+(\d+)\s+(ru|en)$/, async (msg, m) => {
@@ -841,7 +927,7 @@ bot.onText(/^\/setlang(@\w+)?\s+(\d+)\s+(ru|en)$/, async (msg, m) => {
   const uid = parseInt(m[2], 10);
   const lang = m[3];
   setLang(uid, lang);
-  await bot.sendMessage(msg.chat.id, `✅ OK: lang ${uid} -> ${lang}`);
+  await bot.sendMessage(msg.chat.id, ` OK: lang ${uid} -> ${lang}`);
 });
 
 bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
@@ -851,7 +937,7 @@ bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
   const d = new Database("bot.db");
   const users = d.prepare("SELECT COUNT(*) as c FROM users").get().c;
   const prem = d.prepare("SELECT COUNT(*) as c FROM users WHERE is_premium=1").get().c;
-  await bot.sendMessage(msg.chat.id, `👥 users: ${users}\n💎 premium: ${prem}`);
+  await bot.sendMessage(msg.chat.id, `👥 users: ${users}\n premium: ${prem}`);
 });
 
 
@@ -860,14 +946,14 @@ bot.onText(/^\/text(@\w+)?$/, async (msg) => {
   setResponseMode(msg.from.id, "text");
   awaitingCustom.delete(msg.from.id);
   awaitingImage.delete(msg.from.id);
-  await bot.sendMessage(msg.chat.id, "✅ Ок, отвечаю текстом.");
+  await bot.sendMessage(msg.chat.id, " Ок, отвечаю текстом.");
 });
 
 // /voice: включает голосовой режим (premium) + дает кнопки голоса
 bot.onText(/^\/voice(@\w+)?$/, async (msg) => {
   const user = getUser(msg.from.id);
   if (!isPremium(user)) {
-    await bot.sendMessage(msg.chat.id, "⭐ /voice доступно только Premium.");
+    await bot.sendMessage(msg.chat.id, " /voice доступно только Premium.");
     return;
   }
 
@@ -903,7 +989,7 @@ bot.onText(/^\/personality(@\w+)?$/, async (msg) => {
 bot.onText(/^\/custom(@\w+)?$/, async (msg) => {
   const user = getUser(msg.from.id);
   if (!isPremium(user)) {
-    await bot.sendMessage(msg.chat.id, "⭐ /custom доступно только Premium.");
+    await bot.sendMessage(msg.chat.id, " /custom доступно только Premium.");
     return;
   }
   awaitingCustom.set(msg.from.id, true);
@@ -931,7 +1017,7 @@ bot.onText(/^\/image(?:\s+([\s\S]+))?$/, async (msg, match) => {
 
   if (!argPrompt) {
     awaitingImage.set(userId, true);
-    await bot.sendMessage(chatId, "🖼 Ок. Напиши промпт для генерации изображения одним сообщением.");
+    await bot.sendMessage(chatId, " Ок. Напиши промпт для генерации изображения одним сообщением.");
     return;
   }
 
@@ -951,12 +1037,35 @@ bot.onText(/^\/video(?:\s+([\s\S]+))?$/, async (msg, match) => {
 
   if (!argPrompt) {
     awaitingVideo.set(userId, true);
-    await bot.sendMessage(chatId, "🎬 Ок. Напиши промпт для видео одним сообщением.\nПример: /video кот на мотоцикле в неоне");
+    await bot.sendMessage(chatId, "Ок. Напиши промпт для видео одним сообщением.\nПример: /video кот на мотоцикле в неоне");
     return;
   }
 
   await handleVideoPrompt({ msg, prompt: argPrompt });
 });
+
+
+bot.onText(/^\/anim(?:\s+([\s\S]+))?$/, async (msg, match) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const user = getUser(userId);
+
+  const text = (match?.[1] || "").trim();
+  awaitingVideo.delete(userId);
+  awaitingImage.delete(userId);
+  awaitingCustom.delete(userId);
+
+  // If user attached photo with caption "/anim ...", handle in photo handler below.
+  if (!text) {
+    awaitingAnim.set(userId, { text: "" });
+    await bot.sendMessage(chatId, "Ок. Пришли фото и подпись: /anim <текст> (или просто фото + текст).");
+    return;
+  }
+
+  awaitingAnim.set(userId, { text });
+  await bot.sendMessage(chatId, "Ок. Теперь пришли фото (можно просто отправить фото).");
+});
+
 
 // ====== CALLBACK BUTTONS ======
 // ====== CALLBACK BUTTONS ======
@@ -975,11 +1084,20 @@ if (data.startsWith("action:")) {
   const action = data.slice("action:".length);
   const user = getUser(userId);
 
+  if (action === "anim") {
+    awaitingCustom.delete(userId);
+    awaitingImage.delete(userId);
+    awaitingVideo.delete(userId);
+    awaitingAnim.set(userId, { text: "" });
+    await bot.sendMessage(chatId, "Пришли фото и подпись: /anim <текст>.");
+    return;
+  }
+
   if (action === "video") {
     awaitingCustom.delete(userId);
     awaitingImage.delete(userId);
     awaitingVideo.set(userId, true);
-    await bot.sendMessage(chatId, "🎬 Ок. Напиши промпт для видео одним сообщением.\nПример: кот на мотоцикле в неоне\n\nМожно указать секунды: 4, 8 или 12.\nПример: 8 дракон летит над киберпанк городом");
+    await bot.sendMessage(chatId, "Ок. Напиши промпт для видео одним сообщением.\nПример: кот на мотоцикле в неоне\n\nМожно указать секунды: 4, 8 или 12.\nПример: 8 дракон летит над киберпанк городом");
     return;
   }
 
@@ -987,12 +1105,12 @@ if (data.startsWith("action:")) {
     awaitingCustom.delete(userId);
     awaitingVideo.delete(userId);
     awaitingImage.set(userId, true);
-    await bot.sendMessage(chatId, "🖼 Ок. Напиши промпт для изображения одним сообщением.\nПример: киберпанк город на закате, кино-стиль");
+    await bot.sendMessage(chatId, " Ок. Напиши промпт для изображения одним сообщением.\nПример: киберпанк город на закате, кино-стиль");
     return;
   }
 
   if (action === "personality") {
-    await bot.sendMessage(chatId, "Выбери маску командой /personality 🙂");
+    await bot.sendMessage(chatId, "Выбери маску командой /personality ");
     return;
   }
 
@@ -1015,13 +1133,13 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
   const req = pendingVideoConfirm.get(token);
 
   if (!req || req.userId !== userId) {
-    await bot.sendMessage(chatId, "Эта заявка уже устарела. Напиши /video ещё раз 🙂");
+    await bot.sendMessage(chatId, "Эта заявка уже устарела. Напиши /video ещё раз ");
     return;
   }
 
   if (data.startsWith("vcancel:")) {
     pendingVideoConfirm.delete(token);
-    await bot.sendMessage(chatId, "❌ Отменено.");
+    await bot.sendMessage(chatId, " Отменено.");
     return;
   }
 
@@ -1039,7 +1157,7 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
     if (cached?.telegram_file_id) {
       const c = getCredits(userId);
       await bot.sendVideo(chatId, cached.telegram_file_id, {
-        caption: `⚡ Нашёл готовое видео в кэше — кредит не списан.\nКредиты: ${c.total}`,
+        caption: ` Нашёл готовое видео в кэше — кредит не списан.\nКредиты: ${c.total}`,
       });
       return;
     }
@@ -1073,7 +1191,7 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
       const after = getCredits(userId);
 
       const sent = await bot.sendVideo(chatId, outPath, {
-        caption: `Готово ✅\nОсталось кредитов: ${after.total}\n\nИсточник: @${BOT_USERNAME || "your_bot"}`,
+        caption: `Готово \nОсталось кредитов: ${after.total}\n\nИсточник: @${BOT_USERNAME || "your_bot"}`,
       });
 
       // cache Telegram file_id for later reuse
@@ -1085,10 +1203,10 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
       // quick upsell buttons
       const kb = {
         inline_keyboard: [
-          [{ text: "🎬 Ещё видео", callback_data: "action:video" }, { text: "⭐ Купить кредиты", callback_data: "action:store" }],
+          [{ text: "🎬 Ещё видео", callback_data: "action:video" }, { text: " Купить кредиты", callback_data: "action:store" }],
         ],
       };
-      await bot.sendMessage(chatId, "Хочешь ещё? 🙂", { reply_markup: kb });
+      await bot.sendMessage(chatId, "Хочешь ещё? ", { reply_markup: kb });
     } catch (e) {
       const emsg = String(e?.message || e);
       console.error("generateVideo error:", emsg);
@@ -1099,7 +1217,7 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
       if (emsg.toLowerCase().includes("moderation") || emsg.toLowerCase().includes("blocked")) {
         await bot.sendMessage(
           chatId,
-          "⛔ Запрос на видео заблокирован модерацией.\n" +
+          " Запрос на видео заблокирован модерацией.\n" +
             "Переформулируй без 18+, жестокости, оружия, наркотиков, хейта и без реальных людей.\n" +
             "Пример: /video 4 милый кот пьет кофе в неоновом городе, мульт-стиль"
         );
@@ -1107,7 +1225,7 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
       }
 
       if (emsg.toLowerCase().includes("timeout")) {
-        await bot.sendMessage(chatId, "⏳ Видео не успело сгенерироваться (таймаут). Попробуй ещё раз позже.");
+        await bot.sendMessage(chatId, " Видео не успело сгенерироваться (таймаут). Попробуй ещё раз позже.");
         return;
       }
 
@@ -1170,7 +1288,7 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
       const v = data.slice("len:".length);
       if (v === "concise" || v === "normal") {
         setResponseLen(userId, v);
-        await bot.sendMessage(chatId, `✅ ${v === "concise" ? t(user, "lengthConcise") : t(user, "lengthNormal")}`);
+        await bot.sendMessage(chatId, ` ${v === "concise" ? t(user, "lengthConcise") : t(user, "lengthNormal")}`);
       }
       return;
     }
@@ -1186,14 +1304,14 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
 
       const user = getUser(userId);
       if (!isPremium(user)) {
-        await bot.sendMessage(chatId, "⭐ Выбор голоса доступен только Premium. Оформи /premium");
+        await bot.sendMessage(chatId, " Выбор голоса доступен только Premium. Оформи /premium");
         return;
       }
 
       // сохраняем выбор в БД
       setVoiceKey(userId, key);
 
-      await bot.sendMessage(chatId, `✅ Вы выбрали голос: ${v.title}`);
+      await bot.sendMessage(chatId, ` Вы выбрали голос: ${v.title}`);
       return;
     }
 
@@ -1205,7 +1323,7 @@ if (data.startsWith("vconf:") || data.startsWith("vcancel:")) {
         return;
       }
       setPersonality(userId, persKey);
-      await bot.sendMessage(chatId, `✅ Выбрана личность: ${PERSONALITIES[persKey].title}`);
+      await bot.sendMessage(chatId, ` Выбрана личность: ${PERSONALITIES[persKey].title}`);
       return;
     }
 
@@ -1236,13 +1354,13 @@ async function handleImagePrompt({ msg, prompt }) {
       return;
     }
 
-    await bot.sendMessage(chatId, "🖼 Генерирую картинку...");
+    await bot.sendMessage(chatId, " Генерирую картинку...");
 
     try {
       const img = await generateImage(prompt);
 
       if (img?.type === "url") {
-        await bot.sendPhoto(chatId, img.value, { caption: `Готово ✅` });
+        await bot.sendPhoto(chatId, img.value, { caption: `Готово ` });
         return;
       }
 
@@ -1250,7 +1368,7 @@ async function handleImagePrompt({ msg, prompt }) {
         const filename = `img_${chatId}_${Date.now()}.png`;
         const outPath = tmpFile(filename);
         fs.writeFileSync(outPath, Buffer.from(img.value, "base64"));
-        await bot.sendPhoto(chatId, outPath, { caption: `Готово ✅` });
+        await bot.sendPhoto(chatId, outPath, { caption: `Готово ` });
         return;
       }
 
@@ -1301,11 +1419,11 @@ async function handleVideoPrompt({ msg, prompt }) {
   // keep prompts short to reduce nonsense + abuse
   const MAX_PROMPT_LEN = parseInt(process.env.VIDEO_PROMPT_MAX_LEN || "280", 10);
   if (cleanPrompt.length > MAX_PROMPT_LEN) {
-    await bot.sendMessage(chatId, `Слишком длинный промпт (макс ${MAX_PROMPT_LEN} символов). Сократи описание сцены 🙂`);
+    await bot.sendMessage(chatId, `Слишком длинный промпт (макс ${MAX_PROMPT_LEN} символов). Сократи описание сцены `);
     return;
   }
 
-  const creditsNeeded = Math.ceil(seconds / 4);
+  const creditsNeeded = Math.ceil(seconds / 4) * 10;
   const credits = getCredits(userId);
 
   // cache hit -> send instantly (no credit spend)
@@ -1313,7 +1431,7 @@ async function handleVideoPrompt({ msg, prompt }) {
   const cached = getCachedVideo(hash);
   if (cached?.telegram_file_id) {
     await bot.sendVideo(chatId, cached.telegram_file_id, {
-      caption: `⚡ Нашёл готовое видео в кэше — кредит не списан.\nКредиты: ${credits.total}`,
+      caption: ` Нашёл готовое видео в кэше — кредит не списан.\nКредиты: ${credits.total}`,
     });
     return;
   }
@@ -1330,8 +1448,8 @@ async function handleVideoPrompt({ msg, prompt }) {
   const kb = {
     inline_keyboard: [
       [
-        { text: `✅ Создать (${creditsNeeded} кр.)`, callback_data: `vconf:${token}` },
-        { text: "❌ Отмена", callback_data: `vcancel:${token}` },
+        { text: ` Создать (${creditsNeeded} кр.)`, callback_data: `vconf:${token}` },
+        { text: " Отмена", callback_data: `vcancel:${token}` },
       ],
     ],
   };
@@ -1373,6 +1491,87 @@ if ((user.lang || "").toLowerCase() === "en" && looksCyrillicOrArmenian(incoming
 
 // /scan states: photo -> identify / OCR
 if (msg.photo && msg.photo.length) {
+  // D-ID: /anim with photo (caption) OR pending /anim waiting for a photo
+  const cap = String(msg.caption || "").trim();
+  const capMatch = cap.match(/^\/anim(?:\s+([\s\S]+))?$/i) || cap.match(/^\/did(?:\s+([\s\S]+))?$/i);
+  const pending = awaitingAnim.get(userId);
+
+  if (capMatch || pending) {
+    const user2 = getUser(userId);
+    const animText = (capMatch?.[1] || pending?.text || "").trim();
+
+    if (!animText) {
+      awaitingAnim.set(userId, { text: "" });
+      await bot.sendMessage(chatId, "Добавь текст: подпись /anim <текст> или отправь текст отдельно, потом фото.");
+      return;
+    }
+
+    // clear pending to avoid double-run
+    awaitingAnim.delete(userId);
+
+    const photo = msg.photo[msg.photo.length - 1];
+    const fileId = photo.file_id;
+
+    const taskOk = enqueueTask(userId, async () => {
+      let consumed = null;
+      try {
+        // Free first D-ID video for new users
+        const freeAvailable = hasFreeDid(userId);
+        const creditsNeeded = freeAvailable ? 0 : 2;
+
+        if (creditsNeeded > 0) {
+          const c = getCredits(userId);
+          if (c.total < creditsNeeded) {
+            await bot.sendMessage(chatId, t(user2, "noCredits"));
+            return;
+          }
+          consumed = consumeVideoCredits(userId, creditsNeeded);
+          if (!consumed.ok) {
+            await bot.sendMessage(chatId, t(user2, "noCredits"));
+            return;
+          }
+        } else {
+          // mark as used now (so parallel requests can't exploit)
+          markFreeDidUsed(userId);
+        }
+
+        await bot.sendMessage(chatId, "Генерирую анимацию (D-ID)...");
+
+        const imgPath = tmpFile(`did_${chatId}_${Date.now()}.jpg`);
+        await downloadTelegramFile(bot, fileId, imgPath);
+
+        const sourceUrl = await didUploadImage(imgPath);
+        const talkId = await didCreateTalk({ sourceUrl, text: animText });
+        const resultUrl = await didWaitForResult(talkId, { timeoutMs: 90000 });
+
+        const buf = await downloadToBuffer(resultUrl);
+        const outPath = tmpFile(`did_video_${chatId}_${Date.now()}.mp4`);
+        fs.writeFileSync(outPath, buf);
+
+        const after = getCredits(userId);
+        const cap2 = creditsNeeded === 0
+          ? `Готово. Бесплатная анимация использована.\nБаланс: ${after.total}`
+          : `Готово. Списано: ${creditsNeeded} кредитов.\nБаланс: ${after.total}`;
+
+        await bot.sendVideo(chatId, outPath, { caption: cap2 });
+
+      } catch (e) {
+        const emsg = String(e?.message || e);
+        console.error("D-ID error:", emsg);
+
+        if (consumed?.usedMonthly || consumed?.usedPurchased) {
+          refundVideoCredits(userId, consumed.usedMonthly, consumed.usedPurchased);
+        }
+        await bot.sendMessage(chatId, "Ошибка при генерации. Попробуй другое фото/текст.");
+      }
+    });
+
+    if (!taskOk) {
+      await bot.sendMessage(chatId, t(user2, "tooManyQueued"));
+    }
+    return;
+  }
+
   if (awaitingScanText.get(userId)) {
     awaitingScanText.delete(userId);
 
@@ -1480,7 +1679,7 @@ if (msg.successful_payment) {
       const monthlyCredits = tier === "proplus" ? PROPLUS_CREDITS_MONTHLY : PRO_CREDITS_MONTHLY;
       addPurchasedCredits(userId, monthlyCredits);
 
-      await bot.sendMessage(chatId, `✅ Premium активирован (${tier.toUpperCase()}) на ${days} дней. +${monthlyCredits} кредитов.`);
+      await bot.sendMessage(chatId, ` Premium активирован (${tier.toUpperCase()}) на ${days} дней. +${monthlyCredits} кредитов.`);
     }
     return;
   }
@@ -1493,7 +1692,7 @@ if (msg.successful_payment) {
 
     if (paidUserId === userId && Number.isFinite(amount) && amount > 0) {
       addPurchasedCredits(userId, amount);
-      await bot.sendMessage(chatId, `✅ Начислено +${amount} кредитов.`);
+      await bot.sendMessage(chatId, ` Начислено +${amount} кредитов.`);
     }
     return;
   }
@@ -1508,7 +1707,7 @@ if (msg.successful_payment) {
       setPremium(userId, days);
       setPremiumTier(userId, "pro");
       addPurchasedCredits(userId, PRO_CREDITS_MONTHLY);
-      await bot.sendMessage(chatId, `✅ Premium активирован на ${days} дней. +${PRO_CREDITS_MONTHLY} кредитов.`);
+      await bot.sendMessage(chatId, ` Premium активирован на ${days} дней. +${PRO_CREDITS_MONTHLY} кредитов.`);
     }
     return;
   }
@@ -1533,7 +1732,7 @@ if (msg.successful_payment) {
     }
     setCustomPersonality(userId, msg.text.trim());
     awaitingCustom.delete(userId);
-    await bot.sendMessage(chatId, "✅ Кастомная маска сохранена. Память очищена.");
+    await bot.sendMessage(chatId, " Кастомная маска сохранена. Память очищена.");
     return;
   }
 
@@ -1691,7 +1890,7 @@ if (msg.successful_payment) {
   // 8) ответ текстом или голосом
   if (user.response_mode === "voice") {
     if (!premium) {
-      await bot.sendMessage(chatId, "⭐ Голосовые ответы доступны только Premium. Переключил на /text.");
+      await bot.sendMessage(chatId, " Голосовые ответы доступны только Premium. Переключил на /text.");
       setResponseMode(userId, "text");
       await bot.sendMessage(chatId, answer);
       return;
