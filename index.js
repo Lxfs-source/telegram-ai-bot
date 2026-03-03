@@ -711,6 +711,60 @@ function didAuthHeader() {
 
 
 
+async function didCreateTalk({ sourceUrl, text }) {
+  const payload = {
+    source_url: sourceUrl,
+    script: {
+      type: "text",
+      input: text,
+      provider: {
+        type: DID_VOICE_PROVIDER,
+        voice_id: DID_VOICE_ID,
+      },
+    },
+  };
+
+  const res = await fetch("https://api.d-id.com/talks", {
+    method: "POST",
+    headers: {
+      Authorization: didAuthHeader(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`D-ID create talk failed: ${res.status} ${JSON.stringify(json)}`);
+  }
+  if (!json.id) throw new Error(`D-ID create talk: missing id: ${JSON.stringify(json)}`);
+  return json.id;
+}
+
+async function didWaitForResult(talkId, { timeoutMs = 60000 } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const res = await fetch(`https://api.d-id.com/talks/${talkId}`, {
+      method: "GET",
+      headers: { Authorization: didAuthHeader() },
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`D-ID get talk failed: ${res.status} ${JSON.stringify(json)}`);
+    }
+
+    const status = String(json.status || "");
+    if (status === "done" && json.result_url) return json.result_url;
+    if (status === "error" || status === "failed") {
+      throw new Error(`D-ID talk failed: ${JSON.stringify(json)}`);
+    }
+
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error("D-ID timeout");
+}
+
 async function downloadToBuffer(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
