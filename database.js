@@ -314,18 +314,12 @@ function setCustomPersonality(userId, personality) {
 }
 
 function setPremium(userId, days) {
-    const until = Date.now() + days * 24 * 60 * 60 * 1000;
-    db.prepare(`UPDATE users SET is_premium = 1, premium_until = ? WHERE user_id = ?`).run(until, userId);
+  const uid = parseInt(userId, 10);
+  const d = Number(days);
+  if (!uid || !Number.isFinite(d) || d <= 0) return;
+  const until = Date.now() + d * 24 * 60 * 60 * 1000;
+  db.prepare(`UPDATE users SET is_premium = 1, premium_until = ? WHERE user_id = ?`).run(until, uid);
 }
-
-function isPremium(user) {
-    if (!user.is_premium) return false;
-
-    if (Date.now() > user.premium_until) {
-        db.prepare(`UPDATE users SET is_premium = 0 WHERE user_id = ?`).run(user.user_id);
-        return false;
-    }
-    return true;
 
 function revokePremium(userId) {
   const uid = parseInt(userId, 10);
@@ -333,20 +327,36 @@ function revokePremium(userId) {
   db.prepare(`UPDATE users SET is_premium = 0, premium_until = 0 WHERE user_id = ?`).run(uid);
 }
 
-function getStats() {
-  const totalUsers = db.prepare("SELECT COUNT(*) as c FROM users").get().c;
-  const premiumUsers = db.prepare("SELECT COUNT(*) as c FROM users WHERE is_premium = 1 AND premium_until > ?").get(Date.now()).c;
-  const totalCreditsPurchased = db.prepare("SELECT COALESCE(SUM(credits_purchased),0) as s FROM users").get().s;
-  const totalCreditsMonthly = db.prepare("SELECT COALESCE(SUM(credits_monthly),0) as s FROM users").get().s;
-  return { totalUsers, premiumUsers, totalCreditsPurchased, totalCreditsMonthly };
+function isPremium(user) {
+  if (!user || !user.is_premium) return false;
+
+  const until = Number(user.premium_until || 0);
+  if (until > 0 && Date.now() > until) {
+    // expired -> revoke
+    revokePremium(user.user_id);
+    return false;
+  }
+  return true;
 }
 
+function getStats() {
+  const totalUsers = db.prepare("SELECT COUNT(*) as c FROM users").get().c;
+
+  const premiumUsers = db.prepare(
+    "SELECT COUNT(*) as c FROM users WHERE is_premium = 1 AND premium_until > ?"
+  ).get(Date.now()).c;
+
+  const totalCreditsPurchased = db.prepare("SELECT COALESCE(SUM(credits_purchased),0) as s FROM users").get().s;
+  const totalCreditsMonthly = db.prepare("SELECT COALESCE(SUM(credits_monthly),0) as s FROM users").get().s;
+
+  return { totalUsers, premiumUsers, totalCreditsPurchased, totalCreditsMonthly };
 }
 
 function setUserVoice(userId, voiceKey) {
   // alias for backwards compatibility
   setVoiceKey(userId, voiceKey);
 }
+
 
 
 function setLang(userId, lang) {
@@ -565,14 +575,8 @@ function recordPayment({ telegramChargeId, userId, invoicePayload, totalAmount, 
   ).run(String(telegramChargeId), userId, String(invoicePayload || ""), totalAmount || 0, String(currency || ""), Date.now());
 }
 
-function revokePremium(userId) {
-  db.prepare(`
-    UPDATE users
-    SET is_premium = 0,
-        premium_until = 0
-    WHERE user_id = ?
-  `).run(userId);
-}
+
+
 
 module.exports = {
     getUser,

@@ -162,7 +162,7 @@ function minimalStartText(credits) {
     "Бесплатный старт: 1 видео доступно новым пользователям.",
     "",
     "Команды:",
-    "/anim <текст> — оживить фото голосом",
+    "/anim <текст> — оживить фото (D-ID) + выбор голоса",
     "/video <сек> <промпт> — видео Sora 2 (4/8/12)",
     "/image <промпт> — генерация картинки",
     "/buy — купить кредиты",
@@ -271,7 +271,7 @@ async function didUploadImage(imagePath) {
   return url;
 }
 
-async function didCreateTalk({ sourceUrl, text }) {
+async function didCreateTalk({ sourceUrl, text, voiceId }) {
   const payload = {
     source_url: sourceUrl,
     script: {
@@ -279,7 +279,7 @@ async function didCreateTalk({ sourceUrl, text }) {
       input: text,
       provider: {
         type: DID_VOICE_PROVIDER,
-        voice_id: pickDidVoiceId(text),
+        voice_id: (voiceId || pickDidVoiceId(text)),
       },
     },
     config: {
@@ -344,21 +344,47 @@ async function downloadToBuffer(url) {
 
 // ------------------ STATE ------------------
 
-const awaitingAnimPhoto = new Map();      // userId -> { text }
+const awaitingAnimPhoto = new Map();      // userId -> { text, voiceId }
 const pendingVideoConfirm = new Map();    // token -> request
 
 // ------------------ COMMAND MENU ------------------
 
 (async () => {
   try {
+
+    // -------- /anim voice selection --------
+    if (data.startsWith("animv:")) {
+      const v = data.split(":").slice(1).join(":"); // voice id or 'auto'/'skip'
+      const st = awaitingAnimPhoto.get(userId);
+      if (!st) {
+        await bot.sendMessage(chatId, "Сначала введи /anim текст, потом выбери голос.");
+        return;
+      }
+
+      if (v === "auto" || v === "skip") {
+        st.voiceId = "";
+      } else {
+        st.voiceId = v;
+      }
+      awaitingAnimPhoto.set(userId, st);
+
+      await bot.sendMessage(chatId, `Ок, голос: ${st.voiceId || "авто"}
+Теперь пришли фото (одним сообщением).`);
+      return;
+    }
+
     await bot.setMyCommands([
       { command: "start", description: "Главное меню" },
-      { command: "anim", description: "Оживить фото (D-ID): /anim текст" },
+      { command: "anim", description: "Оживить фото (D-ID): /anim текст (с выбором голоса)" },
       { command: "video", description: "Видео Sora 2: /video 4 промпт" },
       { command: "image", description: "Картинка: /image промпт" },
       { command: "buy", description: "Купить кредиты" },
       { command: "personality", description: "Выбор стиля общения" },
       { command: "custom_off", description: "Выключить кастомный стиль" },
+      { command: "id", description: "Показать свой user_id" },
+      { command: "admin", description: "Админ-панель (для админов)" },
+      { command: "cancel", description: "Отмена админ-действия" },
+      { command: "claim_admin", description: "Забрать админку по секрету: /claim_admin <secret>" },
     ]);
   } catch (e) {
     console.log("setMyCommands error:", e?.message || e);
@@ -597,8 +623,24 @@ bot.onText(/^\/anim(@\w+)?(?:\s+([\s\S]+))?$/i, async (msg, match) => {
     return;
   }
 
-  awaitingAnimPhoto.set(userId, { text });
-  await bot.sendMessage(chatId, "Пришли фото (одним сообщением).");
+  awaitingAnimPhoto.set(userId, { text, voiceId: "" });
+
+  const kb = {
+    inline_keyboard: [
+      [{ text: "🎙️ Авто", callback_data: "animv:auto" }],
+      [
+        { text: "🇷🇺 Dmitry (m)", callback_data: "animv:ru-RU-DmitryNeural" },
+        { text: "🇷🇺 Svetlana (f)", callback_data: "animv:ru-RU-SvetlanaNeural" },
+      ],
+      [
+        { text: "🇺🇸 Guy (m)", callback_data: "animv:en-US-GuyNeural" },
+        { text: "🇺🇸 Jenny (f)", callback_data: "animv:en-US-JennyNeural" },
+      ],
+      [{ text: "➡️ Дальше без выбора", callback_data: "animv:skip" }],
+    ],
+  };
+
+  await bot.sendMessage(chatId, "Выбери голос для /anim (или авто), потом пришли фото:", { reply_markup: kb });
 });
 
 // ------------------ /video (Sora 2) ------------------
@@ -853,7 +895,7 @@ bot.on("photo", async (msg) => {
     );
 
     const sourceUrl = await didUploadImage(localPath);
-    const talkId = await didCreateTalk({ sourceUrl, text: pending.text });
+    const talkId = await didCreateTalk({ sourceUrl, text: pending.text, voiceId: pending.voiceId });
     const resultUrl = await didWaitForResult(talkId);
 
     const buf = await downloadToBuffer(resultUrl);
