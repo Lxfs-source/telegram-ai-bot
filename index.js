@@ -164,21 +164,19 @@ const startText = (premium) => `
 Я умею:
 🧠 отвечать на вопросы
 🎨 генерировать изображения
-🎬 создавать AI видео
+🎬 создавать AI видео *(Premium)*
 🎤 отвечать голосом
 🎭 менять личности общения
 
 ⚡ Быстрые команды:
 • /image — создать изображение
-• /video — создать видео
+• /video — создать видео *(Premium)*
 • /personality — выбрать личность
 • /length — длина ответов
 
-⭐ *Premium открывает:*
-• генерацию видео
-• голосовые ответы
-• кастомную личность
-• больше лимитов
+⭐ *Premium даёт:*
+• доступ к генерации видео
+• снятие/увеличение лимитов (голос, изображения и т.п.)
 
 ${premium ? "⭐ У тебя активен Premium." : "💎 Получить Premium: /premium"}
 `;
@@ -672,7 +670,25 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
 
   if (premium) {
     const until = user.premium_until;
-    await bot.sendMessage(chatId, `✅ Premium уже активирован.\nДействует до: ${formatDateTime(until)}`);
+    await bot.sendMessage(
+    chatId,
+    "⭐ Premium
+
+" +
+      "Что даёт:
+" +
+      "• 🎬 /video — генерация видео (только Premium)
+" +
+      "• 📈 Снятие/увеличение лимитов (голос, изображения и т.п.)
+
+" +
+      `Включено: ${PREMIUM_VIDEO_SECONDS_INCLUDED} сек видео в месяц (по $${VIDEO_COST_PER_SEC_USD}/сек).
+` +
+      "Докуп секунд: /buy_video <seconds>
+
+" +
+      "Оформить Premium: нажми кнопку оплаты ниже."
+  );
     return;
   }
 
@@ -1196,6 +1212,46 @@ if (sp.currency === "XTR" && payload.startsWith("premium:")) {
 
   // команды тут не обрабатываем
   if (msg.text && msg.text.startsWith("/")) return;
+
+  // ====== кнопки меню (reply keyboard) ======
+  const menuText = (msg.text || msg.caption || "").trim();
+
+  if (menuText === "🎨 Создать изображение") {
+    awaitingImage.set(userId, true);
+    awaitingVideo.delete(userId);
+    await bot.sendMessage(chatId, "🎨 Напиши запрос для изображения одним сообщением:");
+    return;
+  }
+
+  if (menuText === "🎬 Создать видео") {
+    const u = getUser(userId);
+    if (!isPremium(u)) {
+      await bot.sendMessage(chatId, "🎬 Видео доступно только в Premium.\nОформи: /premium");
+      return;
+    }
+    awaitingVideo.set(userId, true);
+    awaitingImage.delete(userId);
+    await bot.sendMessage(chatId, "🎬 Напиши запрос для видео одним сообщением:");
+    return;
+  }
+
+  if (menuText === "⚙️ Настройки") {
+    await bot.sendMessage(
+      chatId,
+      "⚙️ Настройки Blinksy:\n\n" +
+        "/personality — личность\n" +
+        "/length — длина ответов\n" +
+        "/voice — голос\n" +
+        "/text — текст"
+    );
+    return;
+  }
+
+  if (menuText === "⭐ Premium") {
+    // показываем те же данные, что /premium
+    await bot.sendMessage(chatId, "⭐ Premium: /premium");
+    return;
+  }
 
   // группы: отвечаем только если реплай/упоминание
   if (!shouldRespondInChat(msg)) return;
