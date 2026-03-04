@@ -49,7 +49,19 @@ if (!global.fetch) {
 
 const DID_API_KEY = process.env.DID_API_KEY || "";
 const DID_VOICE_PROVIDER = process.env.DID_VOICE_PROVIDER || "microsoft";
-const DID_VOICE_ID = process.env.DID_VOICE_ID || "en-US-JennyNeural";
+const DID_VOICE_ID = process.env.DID_VOICE_ID || "ru-RU-DmitryNeural";
+
+
+function pickDidVoiceId(text) {
+  // If user overridden DID_VOICE_ID via env, keep it. Otherwise pick a voice by language.
+  const envVoice = process.env.DID_VOICE_ID;
+  if (envVoice && String(envVoice).trim()) return String(envVoice).trim();
+
+  const s = String(text || "");
+  const hasCyr = /[\u0400-\u04FF]/.test(s); // Cyrillic range
+  return hasCyr ? "ru-RU-DmitryNeural" : "en-US-JennyNeural";
+}
+
 
 // Credit costs
 const DID_COST = 1;         // D-ID: 1 credit per ~4s (cheap)
@@ -221,7 +233,7 @@ async function didCreateTalk({ sourceUrl, text }) {
       input: text,
       provider: {
         type: DID_VOICE_PROVIDER,
-        voice_id: DID_VOICE_ID,
+        voice_id: pickDidVoiceId(text),
       },
     },
     config: {
@@ -274,10 +286,9 @@ async function downloadToBuffer(url) {
     const preview = buf.slice(0, 400).toString("utf8");
     throw new Error(`Download failed: ${res.status} ct=${ct} body=${preview}`);
   }
-
   // If D-ID returns HTML/JSON on edge cases, don't treat it as mp4
   const looksLikeVideo = ct.startsWith("video/") || ct.includes("mp4") || ct.includes("octet-stream");
-  if (!looksLikeVideo || buf.length < 200_000) {
+  if (!looksLikeVideo) {
     const preview = buf.slice(0, 400).toString("utf8");
     throw new Error(`Non-video response: ct=${ct} bytes=${buf.length} body=${preview}`);
   }
@@ -456,11 +467,6 @@ bot.onText(/^\/image(@\w+)?\s+([\s\S]+)$/i, async (msg, match) => {
     const outPath = tmpFile(`img_${chatId}_${Date.now()}.png`);
     fs.writeFileSync(outPath, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
 
-    const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
-
-const after = getCredits(userId);
-await bot.sendDocument(chatId, fixed, { caption: `Готово.\nБаланс: ${after.total}` });
-
     await bot.sendPhoto(chatId, outPath, { caption: "Готово." });
   } catch (e) {
     console.log("image error:", e?.message || e);
@@ -482,6 +488,11 @@ bot.onText(/^\/anim(@\w+)?(?:\s+([\s\S]+))?$/i, async (msg, match) => {
   const text = (match?.[2] || "").trim();
   if (!text) {
     await bot.sendMessage(chatId, "Формат: /anim текст\nПотом пришли фото одним сообщением.");
+    return;
+  }
+
+  if (text.length < 5) {
+    await bot.sendMessage(chatId, "Текст слишком короткий. Напиши чуть длиннее (хотя бы 2–3 слова)." );
     return;
   }
 
@@ -612,14 +623,13 @@ bot.on("callback_query", async (q) => {
         fs.writeFileSync(outPath, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
 
         let finalPath = await ffmpegPadToSeconds(outPath, 4).catch(() => outPath);
+        finalPath = await ffmpegFaststart(finalPath).catch(() => finalPath);
 
-// 2) на всякий случай faststart ещё раз
-finalPath = await ffmpegFaststart(finalPath).catch(() => finalPath);
-
-        // Send as document to avoid Telegram client duration glitches
-        const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
         const after = getCredits(userId);
-        await bot.sendDocument(chatId, fixed, { caption: `Готово.\nБаланс: ${after.total}` });
+        await bot.sendVideo(chatId, finalPath, {
+          caption: `Готово.\nБаланс: ${after.total}`,
+          supports_streaming: true,
+        });
       } catch (e) {
         console.log("Sora error:", e?.message || e);
         refundVideoCredits(userId, consumed.usedMonthly, consumed.usedPurchased);
@@ -691,11 +701,21 @@ bot.on("photo", async (msg) => {
     const outPath = tmpFile(`did_out_${chatId}_${Date.now()}.mp4`);
     fs.writeFileSync(outPath, buf);
 
-    // Fix mp4 metadata + send as document to preserve audio/duration in Telegram clients
-    const fixed = await ffmpegFaststart(outPath).catch(() => outPath);
+    // Sanity-check: D-ID sometimes returns ultra-short clips (voice/language mismatch, etc.)
+    const dur = await ffprobeDurationSeconds(outPath).catch(() => 0);
+    if (dur > 0 && dur < 2) {
+      throw new Error(`D-ID returned too-short video (${dur.toFixed(2)}s). Check DID_VOICE_ID / language.`);
+    }
+
+    // Ensure at least 4 seconds for Telegram UI, then move moov atom to start.
+    let finalPath = await ffmpegPadToSeconds(outPath, 4).catch(() => outPath);
+    finalPath = await ffmpegFaststart(finalPath).catch(() => finalPath);
 
     const after = getCredits(userId);
-    await bot.sendDocument(chatId, fixed, { caption: `Готово.\nБаланс: ${after.total}` });
+    await bot.sendVideo(chatId, finalPath, {
+      caption: `Готово.\nБаланс: ${after.total}`,
+      supports_streaming: true,
+    });
   } catch (e) {
     console.log("D-ID error:", e?.message || e);
     refundVideoCredits(userId, consumed.usedMonthly, consumed.usedPurchased);
