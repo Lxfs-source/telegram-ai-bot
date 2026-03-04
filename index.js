@@ -323,7 +323,7 @@ const MASK_PHRASES = [
   "👁 Ты больше не разговариваешь с прежним Степаном…",
 ];
 
-function startText(premium) {
+function startTextLegacy(premium) {
   return [
     "👋 Привет! Я Blinksy.",
     "",
