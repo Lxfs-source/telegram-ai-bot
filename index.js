@@ -638,19 +638,15 @@ bot.onText(/^\/start(@\w+)?$/, async (msg) => {
   await bot.sendMessage(chatId, startText(isPremium(user)), {
     parse_mode: "Markdown",
     reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🎨 Изображение", callback_data: "ui_image" },
-          { text: "🎬 Видео", callback_data: "ui_video" },
-        ],
-        [
-          { text: "⚙️ Настройки", callback_data: "ui_settings" },
-          { text: "⭐ Premium", callback_data: "ui_premium" },
-        ],
+      keyboard: [
+        ["🎨 Создать изображение", "🎬 Создать видео"],
+        ["⚙️ Настройки", "⭐ Premium"],
       ],
+      resize_keyboard: true,
     },
   });
 });
+
 
 
 
