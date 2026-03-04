@@ -8,6 +8,16 @@ const TelegramBot = require("node-telegram-bot-api");
 const PREMIUM_PRICE_XTR = parseInt(process.env.PREMIUM_PRICE_XTR || "299", 10);
 const PREMIUM_DAYS = parseInt(process.env.PREMIUM_DAYS || "30", 10);
 
+// --- Video pricing / quotas ---
+const PREMIUM_PRICE_USD = 9.99;
+const VIDEO_COST_PER_SEC_USD = 0.15;
+// Сколько секунд видео включено в Premium за период (месяц)
+const PREMIUM_VIDEO_SECONDS_INCLUDED = Math.floor(PREMIUM_PRICE_USD / VIDEO_COST_PER_SEC_USD); // 66
+// Длительность одного видео по умолчанию
+const PREMIUM_VIDEO_SECONDS_DEFAULT = parseInt(process.env.PREMIUM_VIDEO_SECONDS_DEFAULT || "12", 10);
+// Цена докупа 1 секунды видео в Stars (XTR). Поставь в .env под свою экономику.
+const VIDEO_PRICE_PER_SEC_XTR = parseInt(process.env.VIDEO_PRICE_PER_SEC_XTR || "0", 10);
+
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -87,6 +97,10 @@ function ensureUserProfileColumns() {
     { name: "first_name", ddl: "ALTER TABLE users ADD COLUMN first_name TEXT DEFAULT ''" },
     { name: "last_name", ddl: "ALTER TABLE users ADD COLUMN last_name TEXT DEFAULT ''" },
     { name: "updated_at", ddl: "ALTER TABLE users ADD COLUMN updated_at INTEGER DEFAULT 0" },
+    { name: "response_length", ddl: "ALTER TABLE users ADD COLUMN response_length TEXT DEFAULT 'normal'" },
+    { name: "video_sec_month", ddl: "ALTER TABLE users ADD COLUMN video_sec_month INTEGER DEFAULT 0" },
+    { name: "video_month", ddl: "ALTER TABLE users ADD COLUMN video_month TEXT DEFAULT ''" },
+    { name: "video_extra_sec", ddl: "ALTER TABLE users ADD COLUMN video_extra_sec INTEGER DEFAULT 0" },
   ];
   for (const c of cols) {
     try {
@@ -381,12 +395,34 @@ function formatDateTime(ms) {
 function buildSystemPrompt(user) {
   const custom = (user.custom_personality || "").trim();
 
+  // 1) база: кастом или выбранная личность
+  let system = "";
   if (custom.length > 0) {
-    return `${BASE_SYSTEM}\n\nТы должен строго следовать этой личности:\n${custom}`;
+    system = `${BASE_SYSTEM}
+
+Ты должен строго следовать этой личности:
+${custom}`;
+  } else {
+    system = PERSONALITIES[user.personality]?.system || PERSONALITIES.default.system;
   }
 
-  return PERSONALITIES[user.personality]?.system || PERSONALITIES.default.system;
+  // 2) длина ответов
+  const len = (user.response_length || "normal").trim();
+  const LEN_RULES = {
+    short:
+      "Длина ответа: КОРОТКО. 1–3 предложения, без лишних деталей. Если нужно — список из 3 пунктов максимум.",
+    normal:
+      "Длина ответа: НОРМАЛЬНО. По делу, без воды. Если тема сложная — кратко структурируй.",
+    long:
+      "Длина ответа: ПОДРОБНО. Дай развернутый ответ со структурой и примерами, но без пустой воды.",
+  };
+
+  system += "
+
+" + (LEN_RULES[len] || LEN_RULES.normal);
+  return system;
 }
+
 
 // --- audio helpers ---
 function toMp3(inPath, outPath) {
@@ -606,7 +642,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
     await bot.sendInvoice(
       chatId,
       `Premium на ${PREMIUM_DAYS} дней`,
-      "Доступ к /custom, /voice и увеличенным лимитам.",
+      "Доступ к /custom, /voice и видео (/video). Включено: " + PREMIUM_VIDEO_SECONDS_INCLUDED + " сек видео в месяц + увеличенные лимиты.",
       payload,
       "",
       "XTR",
@@ -617,6 +653,49 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
     await bot.sendMessage(chatId, "Не смог выставить счёт. Проверь, что бот поддерживает оплаты Stars.");
   }
 });
+
+
+// /buy_video <seconds>: докупить секунды видео (только Premium)
+bot.onText(/^\/buy_video(@\w+)?\s+(\d+)\s*$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  const user = getUser(userId);
+  if (!isPremium(user)) {
+    await bot.sendMessage(chatId, "🎬 Докуп видео доступен только Premium. Оформи /premium");
+    return;
+  }
+
+  const sec = parseInt(match[2], 10);
+  if (!Number.isFinite(sec) || sec <= 0 || sec > 600) {
+    await bot.sendMessage(chatId, "Формат: /buy_video <seconds> (1..600)");
+    return;
+  }
+
+  if (VIDEO_PRICE_PER_SEC_XTR <= 0) {
+    await bot.sendMessage(chatId, "Докуп выключен. Задай VIDEO_PRICE_PER_SEC_XTR в .env (Stars за 1 сек).");
+    return;
+  }
+
+  const amount = sec * VIDEO_PRICE_PER_SEC_XTR;
+  const payload = `video_credits:${userId}:${sec}:${Date.now()}`;
+
+  try {
+    await bot.sendInvoice(
+      chatId,
+      `Докуп видео: ${sec} сек`,
+      `Добавит ${sec} секунд к вашему видео-балансу. (Stars)`,
+      payload,
+      "",
+      "XTR",
+      [{ label: `${sec} sec video`, amount }]
+    );
+  } catch (e) {
+    console.error("sendInvoice video error:", e?.message || e);
+    await bot.sendMessage(chatId, "Не смог выставить счёт на докуп. Проверь Stars/настройки бота.");
+  }
+});
+
 
 bot.onText(/^\/text(@\w+)?$/, async (msg) => {
   getUser(msg.from.id);
@@ -663,6 +742,28 @@ bot.onText(/^\/personality(@\w+)?$/, async (msg) => {
   await bot.sendMessage(msg.chat.id, "🎭 Выбери маску Многоликого Степана:", { reply_markup: keyboard });
 });
 
+// /length: выбор длины ответов
+bot.onText(/^\/length(@\w+)?$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  getUser(userId);
+  upsertUserProfile(msg.from);
+
+  await bot.sendMessage(chatId, "📏 Выбери длину ответов:", {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "⚡ Коротко", callback_data: "len_short" },
+          { text: "🧠 Нормально", callback_data: "len_normal" },
+        ],
+        [{ text: "📚 Подробно", callback_data: "len_long" }],
+      ],
+    },
+  });
+});
+
+
 bot.onText(/^\/custom(@\w+)?$/, async (msg) => {
   const user = getUser(msg.from.id);
   if (!isPremium(user)) {
@@ -688,6 +789,20 @@ bot.onText(/^\/image(?:\s+([\s\S]+))?$/, async (msg, match) => {
   // if (!shouldRespondInChat(msg)) return;
 
   const argPrompt = (match?.[1] || "").trim();
+
+  const user = getUser(userId);
+  const premium = isPremium(user);
+
+  if (!premium) {
+    await bot.sendMessage(
+      chatId,
+      "🎬 Видео — только Premium.\n" +
+        `Цена Premium: $${PREMIUM_PRICE_USD}. Включено: ${PREMIUM_VIDEO_SECONDS_INCLUDED} сек видео в месяц.\n` +
+        "Оформи: /premium"
+    );
+    return;
+  }
+
 
   awaitingCustom.delete(userId);
   awaitingVideo.delete(userId);
@@ -766,6 +881,25 @@ bot.on("callback_query", async (q) => {
       return;
     }
 
+    // 3) LENGTH (длина ответов)
+    if (data.startsWith("len_")) {
+      const length = data.slice("len_".length);
+
+      const allowed = new Set(["short", "normal", "long"]);
+      if (!allowed.has(length)) {
+        await bot.sendMessage(chatId, "Не понял длину 😕");
+        return;
+      }
+
+      // сохраняем в БД напрямую
+      try {
+        db.prepare(`UPDATE users SET response_length = ? WHERE user_id = ?`).run(length, userId);
+      } catch {}
+      const map = { short: "⚡ Коротко", normal: "🧠 Нормально", long: "📚 Подробно" };
+      await bot.sendMessage(chatId, `✅ Длина ответов: ${map[length]}`);
+      return;
+    }
+
   } catch (e) {
     console.error("callback error:", e);
     await bot.sendMessage(chatId, "⚠️ Ошибка при обработке кнопки. Глянь логи.");
@@ -818,6 +952,74 @@ async function handleImagePrompt({ msg, prompt }) {
   }
 }
 
+
+function currentMonthKey() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function getVideoState(userId) {
+  // гарантируем пользователя
+  getUser(userId);
+
+  const row =
+    db
+      .prepare(
+        `SELECT video_sec_month AS used, video_month AS month, video_extra_sec AS extra
+           FROM users
+          WHERE user_id = ?`
+      )
+      .get(userId) || { used: 0, month: "", extra: 0 };
+
+  const nowMonth = currentMonthKey();
+  if (row.month !== nowMonth) {
+    // сброс на новый месяц
+    try {
+      db.prepare(`UPDATE users SET video_sec_month = 0, video_month = ? WHERE user_id = ?`).run(nowMonth, userId);
+    } catch {}
+    return { used: 0, month: nowMonth, extra: row.extra || 0 };
+  }
+  return { used: row.used || 0, month: row.month || nowMonth, extra: row.extra || 0 };
+}
+
+function getVideoRemaining(userId) {
+  const st = getVideoState(userId);
+  const includedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - st.used);
+  const totalLeft = includedLeft + (st.extra || 0);
+  return { ...st, includedLeft, totalLeft };
+}
+
+function consumeVideoSeconds(userId, secondsInt) {
+  const st = getVideoState(userId);
+  const seconds = Math.max(1, secondsInt | 0);
+
+  let used = st.used || 0;
+  let extra = st.extra || 0;
+
+  // сначала тратим включённые секунды (used растёт до лимита), потом extra
+  const includedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - used);
+  if (includedLeft + extra < seconds) {
+    return { ok: false, left: includedLeft + extra, includedLeft, extra };
+  }
+
+  let need = seconds;
+  const takeFromIncluded = Math.min(includedLeft, need);
+  used += takeFromIncluded;
+  need -= takeFromIncluded;
+
+  if (need > 0) {
+    extra -= need;
+  }
+
+  try {
+    db.prepare(`UPDATE users SET video_sec_month = ?, video_extra_sec = ? WHERE user_id = ?`).run(used, extra, userId);
+  } catch {}
+  const newIncludedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - used);
+  return { ok: true, used, extra, left: newIncludedLeft + extra, includedLeft: newIncludedLeft };
+}
+
 async function handleVideoPrompt({ msg, prompt }) {
   const userId = msg.from.id;
   const chatId = msg.chat.id;
@@ -825,24 +1027,48 @@ async function handleVideoPrompt({ msg, prompt }) {
   const user = getUser(userId);
   const premium = isPremium(user);
 
-  const lim = consumeVideo(userId, premium);
-  if (!lim.ok) {
-    await bot.sendMessage(chatId, `Лимит видео исчерпан.\nВаш лимит: ${lim.max} в день.`);
+  if (!premium) {
+    await bot.sendMessage(
+      chatId,
+      "🎬 Генерация видео — только Premium.\n" +
+        `Цена Premium: $${PREMIUM_PRICE_USD}. Включено: ${PREMIUM_VIDEO_SECONDS_INCLUDED} сек видео в месяц (по себестоимости $${VIDEO_COST_PER_SEC_USD}/сек).\n` +
+        "Оформи: /premium"
+    );
     return;
   }
 
-  const seconds = premium ? "12" : "4";
-  await bot.sendMessage(chatId, `🎬 Генерирую видео (${seconds} сек)...`);
+  const seconds = PREMIUM_VIDEO_SECONDS_DEFAULT;
+
+  const rem = getVideoRemaining(userId);
+  if (rem.totalLeft < seconds) {
+    const priceHint =
+      VIDEO_PRICE_PER_SEC_XTR > 0
+        ? `\nДокуп: /buy_video ${Math.max(5, seconds)} (Stars).`
+        : "\nДокуп недоступен: задай VIDEO_PRICE_PER_SEC_XTR в .env.";
+    await bot.sendMessage(
+      chatId,
+      `Лимит видео на месяц исчерпан.\nОсталось: ${rem.totalLeft} сек (включено осталось: ${rem.includedLeft} сек, докуплено осталось: ${rem.extra} сек).` +
+        priceHint
+    );
+    return;
+  }
+
+  // списываем секунды ДО генерации (чтобы не абузили)
+  const lim = consumeVideoSeconds(userId, seconds);
+  if (!lim.ok) {
+    await bot.sendMessage(chatId, "Лимит видео исчерпан.");
+    return;
+  }
+
+  await bot.sendMessage(chatId, `🎬 Генерирую видео (${seconds} сек)...\nОсталось в этом месяце: ${lim.left} сек`);
 
   try {
-    // generateVideoToBuffer должен вернуть Buffer ИЛИ ArrayBuffer
     const buf = await generateVideoToBuffer({
       prompt,
-      seconds,
+      seconds: String(seconds),
       model: "sora-2",
     });
 
-    // Приводим к Node Buffer в любом случае
     const fixedBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
 
     const filename = `video_${chatId}_${Date.now()}.mp4`;
@@ -851,9 +1077,20 @@ async function handleVideoPrompt({ msg, prompt }) {
     fs.writeFileSync(outPath, fixedBuf);
 
     await bot.sendVideo(chatId, outPath, {
-      caption: `Готово ✅ (осталось сегодня: ${lim.left})`,
+      caption: `Готово ✅ (осталось в этом месяце: ${lim.left} сек)`,
     });
   } catch (e) {
+    // вернём секунды, если генерация упала
+    try {
+      const st = getVideoState(userId);
+      // откат: если в этом месяце used >= seconds, уменьшаем used; иначе возвращаем в extra
+      if ((st.used || 0) >= seconds) {
+        db.prepare(`UPDATE users SET video_sec_month = ? WHERE user_id = ?`).run((st.used || 0) - seconds, userId);
+      } else {
+        db.prepare(`UPDATE users SET video_extra_sec = ? WHERE user_id = ?`).run((st.extra || 0) + seconds, userId);
+      }
+    } catch {}
+
     const emsg = String(e?.message || e);
     console.error("generateVideo error:", emsg);
 
@@ -883,7 +1120,27 @@ bot.on("message", async (msg) => {
     const sp = msg.successful_payment;
     const payload = sp.invoice_payload || "";
 
-    if (sp.currency === "XTR" && payload.startsWith("premium:")) {
+    
+    if (sp.currency === "XTR" && payload.startsWith("video_credits:")) {
+      const parts = payload.split(":");
+      const paidUserId = parseInt(parts[1], 10);
+      const sec = parseInt(parts[2], 10);
+
+      if (paidUserId === userId && Number.isFinite(sec) && sec > 0) {
+        try {
+          getUser(userId);
+          const st = getVideoState(userId);
+          db.prepare(`UPDATE users SET video_extra_sec = ? WHERE user_id = ?`).run((st.extra || 0) + sec, userId);
+          await bot.sendMessage(chatId, `✅ Видео-кредиты добавлены: +${sec} сек. Всего доступно: ${getVideoRemaining(userId).totalLeft} сек.`);
+        } catch (e) {
+          console.error("video credits add error:", e?.message || e);
+          await bot.sendMessage(chatId, "Оплата прошла, но не смог обновить кредиты. Напиши админу.");
+        }
+      }
+      return;
+    }
+
+if (sp.currency === "XTR" && payload.startsWith("premium:")) {
       const parts = payload.split(":");
       const paidUserId = parseInt(parts[1], 10);
       const days = parseInt(parts[2], 10);
@@ -931,6 +1188,12 @@ bot.on("message", async (msg) => {
 
   // 2.1) если ждём /video prompt
   if (awaitingVideo.get(userId)) {
+    if (!premium) {
+      awaitingVideo.delete(userId);
+      await bot.sendMessage(chatId, "🎬 Видео — только Premium. Оформи /premium");
+      return;
+    }
+
     if (!msg.text || msg.text.trim().length < 3) {
       await bot.sendMessage(chatId, "Промпт слишком короткий. Опиши нормально, что генерировать.");
       return;
