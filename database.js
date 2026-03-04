@@ -565,6 +565,15 @@ function recordPayment({ telegramChargeId, userId, invoicePayload, totalAmount, 
   ).run(String(telegramChargeId), userId, String(invoicePayload || ""), totalAmount || 0, String(currency || ""), Date.now());
 }
 
+function revokePremium(userId) {
+  db.prepare(`
+    UPDATE users
+    SET is_premium = 0,
+        premium_until = 0
+    WHERE user_id = ?
+  `).run(userId);
+}
+
 module.exports = {
     getUser,
     setResponseMode,
