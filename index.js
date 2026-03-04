@@ -442,9 +442,7 @@ ${custom}`;
       "Длина ответа: ПОДРОБНО. Дай развернутый ответ со структурой и примерами, но без пустой воды.",
   };
 
-  system += "
-
-" + (LEN_RULES[len] || LEN_RULES.normal);
+  system += "\n\n" + (LEN_RULES[len] || LEN_RULES.normal);
   return system;
 }
 
