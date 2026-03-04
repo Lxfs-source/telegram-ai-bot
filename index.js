@@ -158,6 +158,31 @@ const BASE_SYSTEM = `
 `;
 
 // ====== PERSONALITIES (маски) ======
+const startText = (premium) => `
+🤖 *Blinksy* — твой AI ассистент.
+
+Я умею:
+🧠 отвечать на вопросы
+🎨 генерировать изображения
+🎬 создавать AI видео
+🎤 отвечать голосом
+🎭 менять личности общения
+
+⚡ Быстрые команды:
+• /image — создать изображение
+• /video — создать видео
+• /personality — выбрать личность
+• /length — длина ответов
+
+⭐ *Premium открывает:*
+• генерацию видео
+• голосовые ответы
+• кастомную личность
+• больше лимитов
+
+${premium ? "⭐ У тебя активен Premium." : "💎 Получить Premium: /premium"}
+`;
+
 const PERSONALITIES = {
   default: {
     title: "🧠 Обычный",
@@ -606,9 +631,24 @@ bot.onText(/^\/admin_take_all(@\w+)?$/, async (msg) => {
 });
 
 bot.onText(/^\/start(@\w+)?$/, async (msg) => {
-  const user = getUser(msg.from.id);
-  await bot.sendMessage(msg.chat.id, startText(isPremium(user)));
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  const user = getUser(userId);
+  upsertUserProfile(msg.from);
+
+  await bot.sendMessage(chatId, startText(isPremium(user)), {
+    parse_mode: "Markdown",
+    reply_markup: {
+      keyboard: [
+        ["🎨 Создать изображение", "🎬 Создать видео"],
+        ["⚙️ Настройки", "⭐ Premium"],
+      ],
+      resize_keyboard: true,
+    },
+  });
 });
+
 
 bot.onText(/^\/myid(@\w+)?$/, async (msg) => {
   await bot.sendMessage(msg.chat.id, `Ваш ID: ${msg.from.id}`);
