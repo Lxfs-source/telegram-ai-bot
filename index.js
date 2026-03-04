@@ -29,6 +29,14 @@ const {
   consumeVideoCredits,
   refundVideoCredits,
   addPurchasedCredits,
+  // admin + premium
+  setPremium,
+  revokePremium,
+  isAdmin,
+  addAdmin,
+  removeAdmin,
+  listAdmins,
+  getStats,
   // payments
   isPaymentProcessed,
   recordPayment,
@@ -75,6 +83,44 @@ const CREDIT_PACKS = [
 ];
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+// ------------------ ADMIN ------------------
+// Admins can be defined via .env: ADMIN_IDS=123,456 (comma-separated)
+// Or added to DB via /claim_admin <ADMIN_SECRET> (if ADMIN_SECRET is set)
+const pendingAdmin = new Map(); // adminId -> { action }
+
+function isPrivateChat(msg) {
+  return msg?.chat?.type === "private";
+}
+
+async function requireAdmin(chatId, userId) {
+  if (isAdmin(userId)) return true;
+  await bot.sendMessage(
+    chatId,
+    `⛔️ Нет доступа.\nТвой user_id: ${userId}\n\nАдмин может добавить тебя так:\n1) В .env: ADMIN_IDS=${userId}\nили\n2) Установить ADMIN_SECRET и выполнить: /claim_admin <секрет>`
+  );
+  return false;
+}
+
+function adminMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📊 Статистика", callback_data: "admin:stats" }],
+      [
+        { text: "⭐️ Выдать премиум", callback_data: "admin:prem" },
+        { text: "⛔️ Снять премиум", callback_data: "admin:unprem" },
+      ],
+      [{ text: "💳 Выдать кредиты", callback_data: "admin:credits" }],
+      [
+        { text: "➕ Добавить админа", callback_data: "admin:addadmin" },
+        { text: "➖ Удалить админа", callback_data: "admin:rmadmin" },
+      ],
+      [{ text: "👥 Список админов", callback_data: "admin:listadmins" }],
+      [{ text: "❌ Закрыть", callback_data: "admin:close" }],
+    ],
+  };
+}
+
 
 // ------------------ HELPERS ------------------
 
@@ -317,6 +363,61 @@ const pendingVideoConfirm = new Map();    // token -> request
   } catch (e) {
     console.log("setMyCommands error:", e?.message || e);
   }
+
+// ------------------ /id ------------------
+bot.onText(/^\/id(@\w+)?$/, async (msg) => {
+  await bot.sendMessage(msg.chat.id, `Твой user_id: ${msg.from.id}`);
+});
+
+// ------------------ /admin ------------------
+bot.onText(/^\/admin(@\w+)?$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (!(await requireAdmin(chatId, userId))) return;
+  if (!isPrivateChat(msg)) {
+    await bot.sendMessage(chatId, "Админка доступна только в личке с ботом.");
+    return;
+  }
+
+  pendingAdmin.delete(userId);
+  await bot.sendMessage(chatId, "Админ-панель:", { reply_markup: adminMenuKeyboard() });
+});
+
+// ------------------ /claim_admin <secret> ------------------
+bot.onText(/^\/claim_admin(@\w+)?\s+(.+)$/i, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (!isPrivateChat(msg)) {
+    await bot.sendMessage(chatId, "Эту команду используй в личке с ботом.");
+    return;
+  }
+
+  const secret = String(match?.[2] || "").trim();
+  const envSecret = String(process.env.ADMIN_SECRET || "").trim();
+
+  if (!envSecret) {
+    await bot.sendMessage(chatId, "ADMIN_SECRET не задан в .env (на сервере).");
+    return;
+  }
+  if (secret !== envSecret) {
+    await bot.sendMessage(chatId, "Неверный секрет.");
+    return;
+  }
+
+  addAdmin(userId);
+  await bot.sendMessage(chatId, "✅ Ок, ты добавлен в админы. Команда: /admin");
+});
+
+// ------------------ /cancel ------------------
+bot.onText(/^\/cancel(@\w+)?$/, async (msg) => {
+  const userId = msg.from.id;
+  pendingAdmin.delete(userId);
+  await bot.sendMessage(msg.chat.id, "Ок, отменено.");
+});
+
+
 })();
 
 // ------------------ /start ------------------
@@ -548,6 +649,64 @@ bot.on("callback_query", async (q) => {
   if (!chatId || !userId) return;
 
   try {
+    // -------- admin callbacks --------
+    if (data.startsWith("admin:")) {
+      if (!(await requireAdmin(chatId, userId))) return;
+
+      const cmd = data.split(":")[1];
+
+      if (cmd === "close") {
+        pendingAdmin.delete(userId);
+        try { await bot.deleteMessage(chatId, q.message.message_id); } catch (e) {}
+        return;
+      }
+
+      if (cmd === "stats") {
+        const s = getStats();
+        await bot.sendMessage(
+          chatId,
+          `📊 Статистика\n\n👤 Пользователей: ${s.totalUsers}\n⭐️ Премиум активных: ${s.premiumUsers}\n💳 Кредитов куплено (сумма): ${s.totalCreditsPurchased}\n🎁 Кредитов monthly (сумма): ${s.totalCreditsMonthly}`
+        );
+        return;
+      }
+
+      if (cmd === "listadmins") {
+        const list = listAdmins();
+        const envRaw = String(process.env.ADMIN_IDS || "").trim();
+        const txt = [
+          "👥 Админы (DB):",
+          ...(list.length ? list.map(r => `- ${r.user_id}`) : ["- (пусто)"]),
+          "",
+          `👥 Админы (ENV ADMIN_IDS): ${envRaw || "(не задано)"}`
+        ].join("\n");
+        await bot.sendMessage(chatId, txt);
+        return;
+      }
+
+      const ask = async (action, hint) => {
+        pendingAdmin.set(userId, { action });
+        await bot.sendMessage(chatId, hint + "\n\nОтмена: /cancel");
+      };
+
+      if (cmd === "prem") {
+        return ask("prem", "Введи: user_id дни\nПример: 123456789 30");
+      }
+      if (cmd === "unprem") {
+        return ask("unprem", "Введи: user_id\nПример: 123456789");
+      }
+      if (cmd === "credits") {
+        return ask("credits", "Введи: user_id кредиты\nПример: 123456789 50");
+      }
+      if (cmd === "addadmin") {
+        return ask("addadmin", "Введи user_id кого добавить в админы\nПример: 123456789");
+      }
+      if (cmd === "rmadmin") {
+        return ask("rmadmin", "Введи user_id кого удалить из админов\nПример: 123456789");
+      }
+
+      return;
+    }
+
     if (data.startsWith("action:")) {
       const a = data.split(":")[1];
 
@@ -730,6 +889,90 @@ bot.on("message", async (msg) => {
   const userId = msg.from.id;
 
   const text = msg.text || msg.caption || "";
+
+  // Admin input flow (only in private chat)
+  if (pendingAdmin.has(userId) && isPrivateChat(msg)) {
+    const st = pendingAdmin.get(userId);
+    const parts = String(text || "").trim().split(/\s+/).filter(Boolean);
+
+    const num = (v) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    try {
+      if (st.action === "prem") {
+        const target = num(parts[0]);
+        const days = num(parts[1] || "30");
+        if (!target || !days) {
+          await bot.sendMessage(chatId, "Неверный формат. Пример: 123456789 30");
+          return;
+        }
+        getUser(target);
+        setPremium(target, days);
+        pendingAdmin.delete(userId);
+        await bot.sendMessage(chatId, `✅ Выдал премиум пользователю ${target} на ${days} дн.`);
+        return;
+      }
+
+      if (st.action === "unprem") {
+        const target = num(parts[0]);
+        if (!target) {
+          await bot.sendMessage(chatId, "Неверный формат. Пример: 123456789");
+          return;
+        }
+        getUser(target);
+        revokePremium(target);
+        pendingAdmin.delete(userId);
+        await bot.sendMessage(chatId, `✅ Снял премиум у пользователя ${target}.`);
+        return;
+      }
+
+      if (st.action === "credits") {
+        const target = num(parts[0]);
+        const credits = num(parts[1]);
+        if (!target || !credits) {
+          await bot.sendMessage(chatId, "Неверный формат. Пример: 123456789 50");
+          return;
+        }
+        getUser(target);
+        addPurchasedCredits(target, credits);
+        pendingAdmin.delete(userId);
+        await bot.sendMessage(chatId, `✅ Начислил ${credits} кредитов пользователю ${target}.`);
+        return;
+      }
+
+      if (st.action === "addadmin") {
+        const target = num(parts[0]);
+        if (!target) {
+          await bot.sendMessage(chatId, "Неверный формат. Пример: 123456789");
+          return;
+        }
+        addAdmin(target);
+        pendingAdmin.delete(userId);
+        await bot.sendMessage(chatId, `✅ Добавил админа: ${target}`);
+        return;
+      }
+
+      if (st.action === "rmadmin") {
+        const target = num(parts[0]);
+        if (!target) {
+          await bot.sendMessage(chatId, "Неверный формат. Пример: 123456789");
+          return;
+        }
+        removeAdmin(target);
+        pendingAdmin.delete(userId);
+        await bot.sendMessage(chatId, `✅ Удалил админа: ${target}`);
+        return;
+      }
+    } catch (e) {
+      console.log("admin flow error:", e?.message || e);
+      pendingAdmin.delete(userId);
+      await bot.sendMessage(chatId, "Ошибка в админке. Отменил действие.");
+      return;
+    }
+  }
+
   if (!text || text.startsWith("/")) return;
   if (msg.successful_payment) return;
   if (awaitingAnimPhoto.has(userId)) return;

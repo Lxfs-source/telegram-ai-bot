@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS settings (
 )
 `).run();
 
+
+// --- admins ---
+db.prepare(`
+CREATE TABLE IF NOT EXISTS admins (
+  user_id INTEGER PRIMARY KEY,
+  added_at INTEGER NOT NULL
+)
+`).run();
+
 // --- video cache (prompt hash -> Telegram file_id) ---
 db.prepare(`
 CREATE TABLE IF NOT EXISTS video_cache (
@@ -159,6 +168,49 @@ function setCachedVideo({ hash, seconds, prompt, telegram_file_id }) {
   `).run(hash, seconds || 4, String(prompt || ""), String(telegram_file_id || ""), Date.now());
 }
 
+
+
+// ---------------- admins ----------------
+function parseAdminIdsEnv() {
+  const raw = String(process.env.ADMIN_IDS || "").trim();
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => parseInt(s, 10))
+    .filter(n => Number.isFinite(n) && n > 0);
+}
+
+function isAdmin(userId) {
+  const uid = parseInt(userId, 10);
+  if (!uid) return false;
+
+  const envAdmins = parseAdminIdsEnv();
+  if (envAdmins.includes(uid)) return true;
+
+  const row = db.prepare("SELECT user_id FROM admins WHERE user_id = ?").get(uid);
+  return !!row;
+}
+
+function addAdmin(userId) {
+  const uid = parseInt(userId, 10);
+  if (!uid) return false;
+  db.prepare("INSERT OR IGNORE INTO admins (user_id, added_at) VALUES (?, ?)").run(uid, Date.now());
+  return true;
+}
+
+function removeAdmin(userId) {
+  const uid = parseInt(userId, 10);
+  if (!uid) return false;
+  db.prepare("DELETE FROM admins WHERE user_id = ?").run(uid);
+  return true;
+}
+
+function listAdmins() {
+  const rows = db.prepare("SELECT user_id, added_at FROM admins ORDER BY added_at DESC").all();
+  return rows || [];
+}
 
 function dayKey(d = new Date()) {
     // YYYY-MM-DD
@@ -274,6 +326,21 @@ function isPremium(user) {
         return false;
     }
     return true;
+
+function revokePremium(userId) {
+  const uid = parseInt(userId, 10);
+  if (!uid) return;
+  db.prepare(`UPDATE users SET is_premium = 0, premium_until = 0 WHERE user_id = ?`).run(uid);
+}
+
+function getStats() {
+  const totalUsers = db.prepare("SELECT COUNT(*) as c FROM users").get().c;
+  const premiumUsers = db.prepare("SELECT COUNT(*) as c FROM users WHERE is_premium = 1 AND premium_until > ?").get(Date.now()).c;
+  const totalCreditsPurchased = db.prepare("SELECT COALESCE(SUM(credits_purchased),0) as s FROM users").get().s;
+  const totalCreditsMonthly = db.prepare("SELECT COALESCE(SUM(credits_monthly),0) as s FROM users").get().s;
+  return { totalUsers, premiumUsers, totalCreditsPurchased, totalCreditsMonthly };
+}
+
 }
 
 function setUserVoice(userId, voiceKey) {
@@ -505,6 +572,14 @@ module.exports = {
     setCustomPersonality,
     setPremium,
     isPremium,
+    revokePremium,
+
+    // admins
+    isAdmin,
+    addAdmin,
+    removeAdmin,
+    listAdmins,
+    getStats,
 
     // voice
     setVoiceKey,
