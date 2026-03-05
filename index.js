@@ -1098,21 +1098,6 @@ async function consumeVideoSeconds(userId, secondsInt) {
   return { ok: true, used, extra, left: newIncludedLeft + extra, includedLeft: newIncludedLeft };
 }
 
-  let need = seconds;
-  const takeFromIncluded = Math.min(includedLeft, need);
-  used += takeFromIncluded;
-  need -= takeFromIncluded;
-
-  if (need > 0) {
-    extra -= need;
-  }
-
-  try {
-    db.prepare(`UPDATE users SET video_sec_month = ?, video_extra_sec = ? WHERE user_id = ?`).run(used, extra, userId);
-  } catch {}
-  const newIncludedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - used);
-  return { ok: true, used, extra, left: newIncludedLeft + extra, includedLeft: newIncludedLeft };
-}
 
 async function handleVideoPrompt({ msg, prompt }) {
   const userId = msg.from.id;
