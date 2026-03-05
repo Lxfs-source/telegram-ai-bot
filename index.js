@@ -3,35 +3,61 @@ require("dotenv").config();
 const { webSearch } = require("./search");
 const db = require("./database");
 
-// ===== DB helpers (supports both better-sqlite3 and async sqlite wrapper) =====
-function hasPrepareDB() {
-  return db && typeof db.prepare === "function";
+// ===== DB helpers (supports custom ./database module) =====
+function resolveDbConn() {
+  if (!db) return null;
+
+  // if ./database exports the connection directly
+  if (typeof db.prepare === "function" || typeof db.get === "function" || typeof db.query === "function") return db;
+
+  // common wrappers: { db }, { conn }, { sqlite }, etc.
+  const candidates = ["db", "conn", "connection", "client", "sqlite", "sqliteDb", "database", "raw"];
+  for (const k of candidates) {
+    const c = db[k];
+    if (c && (typeof c.prepare === "function" || typeof c.get === "function" || typeof c.query === "function")) return c;
+  }
+
+  return null;
+}
+
+function hasPrepareDBConn(conn) {
+  return conn && typeof conn.prepare === "function";
 }
 
 async function dbGet(sql, params = []) {
-  if (hasPrepareDB()) return db.prepare(sql).get(...params);
-  if (typeof db.get === "function") return await db.get(sql, params);
-  if (typeof db.query === "function") {
-    const rows = await db.query(sql, params);
+  const conn = resolveDbConn();
+  if (!conn) throw new Error("DB adapter: no get/prepare/query method");
+
+  if (hasPrepareDBConn(conn)) return conn.prepare(sql).get(...params);
+  if (typeof conn.get === "function") return await conn.get(sql, params);
+  if (typeof conn.query === "function") {
+    const rows = await conn.query(sql, params);
     return rows?.[0] || undefined;
   }
   throw new Error("DB adapter: no get/prepare/query method");
 }
 
 async function dbAll(sql, params = []) {
-  if (hasPrepareDB()) return db.prepare(sql).all(...params);
-  if (typeof db.all === "function") return await db.all(sql, params);
-  if (typeof db.query === "function") return await db.query(sql, params);
+  const conn = resolveDbConn();
+  if (!conn) throw new Error("DB adapter: no all/prepare/query method");
+
+  if (hasPrepareDBConn(conn)) return conn.prepare(sql).all(...params);
+  if (typeof conn.all === "function") return await conn.all(sql, params);
+  if (typeof conn.query === "function") return await conn.query(sql, params);
   throw new Error("DB adapter: no all/prepare/query method");
 }
 
 async function dbRun(sql, params = []) {
-  if (hasPrepareDB()) return db.prepare(sql).run(...params);
-  if (typeof db.run === "function") return await db.run(sql, params);
-  if (typeof db.exec === "function") return await db.exec(sql, params);
-  if (typeof db.execute === "function") return await db.execute(sql, params);
+  const conn = resolveDbConn();
+  if (!conn) throw new Error("DB adapter: no run/prepare/exec/execute method");
+
+  if (hasPrepareDBConn(conn)) return conn.prepare(sql).run(...params);
+  if (typeof conn.run === "function") return await conn.run(sql, params);
+  if (typeof conn.exec === "function") return await conn.exec(sql, params);
+  if (typeof conn.execute === "function") return await conn.execute(sql, params);
   throw new Error("DB adapter: no run/prepare/exec/execute method");
 }
+
 const path = require("path");
 const fs = require("fs");
 const TelegramBot = require("node-telegram-bot-api");
@@ -122,7 +148,8 @@ function isAdmin(userId) {
 
 // Добавим поля профиля (если их нет) и будем обновлять username для админ-списков
 function ensureUserProfileColumns() {
-  if (!hasPrepareDB()) return;
+  const conn = resolveDbConn();
+  if (!conn || typeof conn.prepare !== "function") return;
   const cols = [
     { name: "username", ddl: "ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''" },
     { name: "first_name", ddl: "ALTER TABLE users ADD COLUMN first_name TEXT DEFAULT ''" },
@@ -135,7 +162,7 @@ function ensureUserProfileColumns() {
   ];
   for (const c of cols) {
     try {
-      db.prepare(c.ddl).run();
+      conn.prepare(c.ddl).run();
       console.log("[admin] Added column:", c.name);
     } catch (e) {
       // already exists -> ignore
