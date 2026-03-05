@@ -2,7 +2,10 @@ const awaitingAdminGiveDays = new Map();
 require("dotenv").config();
 
 const { webSearch } = require("./search");
-const db = require("./database");
+let db = require("./database");
+// поддержка exports = function() { return db }
+if (db && typeof db === "function") db = db();
+if (db && db.default) db = db.default;
 
 // ===== DB helpers (supports custom ./database module) =====
 function resolveDbConn() {
