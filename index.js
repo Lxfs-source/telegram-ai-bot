@@ -2,6 +2,36 @@ require("dotenv").config();
 
 const { webSearch } = require("./search");
 const db = require("./database");
+
+// ===== DB helpers (supports both better-sqlite3 and async sqlite wrapper) =====
+function hasPrepareDB() {
+  return db && typeof db.prepare === "function";
+}
+
+async function dbGet(sql, params = []) {
+  if (hasPrepareDB()) return db.prepare(sql).get(...params);
+  if (typeof db.get === "function") return await db.get(sql, params);
+  if (typeof db.query === "function") {
+    const rows = await db.query(sql, params);
+    return rows?.[0] || undefined;
+  }
+  throw new Error("DB adapter: no get/prepare/query method");
+}
+
+async function dbAll(sql, params = []) {
+  if (hasPrepareDB()) return db.prepare(sql).all(...params);
+  if (typeof db.all === "function") return await db.all(sql, params);
+  if (typeof db.query === "function") return await db.query(sql, params);
+  throw new Error("DB adapter: no all/prepare/query method");
+}
+
+async function dbRun(sql, params = []) {
+  if (hasPrepareDB()) return db.prepare(sql).run(...params);
+  if (typeof db.run === "function") return await db.run(sql, params);
+  if (typeof db.exec === "function") return await db.exec(sql, params);
+  if (typeof db.execute === "function") return await db.execute(sql, params);
+  throw new Error("DB adapter: no run/prepare/exec/execute method");
+}
 const path = require("path");
 const fs = require("fs");
 const TelegramBot = require("node-telegram-bot-api");
@@ -92,6 +122,7 @@ function isAdmin(userId) {
 
 // Добавим поля профиля (если их нет) и будем обновлять username для админ-списков
 function ensureUserProfileColumns() {
+  if (!hasPrepareDB()) return;
   const cols = [
     { name: "username", ddl: "ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''" },
     { name: "first_name", ddl: "ALTER TABLE users ADD COLUMN first_name TEXT DEFAULT ''" },
@@ -670,7 +701,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
 
   if (premium) {
     const until = user.premium_until ? formatDateTime(user.premium_until) : "-";
-    const rem = getVideoRemaining(userId);
+    const rem = await getVideoRemaining(userId);
 
     const text =
       `⭐ Premium активен до: ${until}\n\n` +
@@ -1016,49 +1047,56 @@ function currentMonthKey() {
   return `${y}-${m}`;
 }
 
-function getVideoState(userId) {
-  // гарантируем пользователя
+async function getVideoState(userId) {
   getUser(userId);
 
   const row =
-    db
-      .prepare(
-        `SELECT video_sec_month AS used, video_month AS month, video_extra_sec AS extra
-           FROM users
-          WHERE user_id = ?`
-      )
-      .get(userId) || { used: 0, month: "", extra: 0 };
+    (await dbGet(
+      `SELECT video_sec_month AS used, video_month AS month, video_extra_sec AS extra
+         FROM users
+        WHERE user_id = ?`,
+      [userId]
+    )) || { used: 0, month: "", extra: 0 };
 
   const nowMonth = currentMonthKey();
   if (row.month !== nowMonth) {
-    // сброс на новый месяц
-    try {
-      db.prepare(`UPDATE users SET video_sec_month = 0, video_month = ? WHERE user_id = ?`).run(nowMonth, userId);
-    } catch {}
+    await dbRun(`UPDATE users SET video_sec_month = 0, video_month = ? WHERE user_id = ?`, [nowMonth, userId]);
     return { used: 0, month: nowMonth, extra: row.extra || 0 };
   }
   return { used: row.used || 0, month: row.month || nowMonth, extra: row.extra || 0 };
 }
 
-function getVideoRemaining(userId) {
-  const st = getVideoState(userId);
-  const includedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - st.used);
+async function getVideoRemaining(userId) {
+  const st = await getVideoState(userId);
+  const includedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - (st.used || 0));
   const totalLeft = includedLeft + (st.extra || 0);
   return { ...st, includedLeft, totalLeft };
 }
 
-function consumeVideoSeconds(userId, secondsInt) {
-  const st = getVideoState(userId);
+async function consumeVideoSeconds(userId, secondsInt) {
+  const st = await getVideoState(userId);
   const seconds = Math.max(1, secondsInt | 0);
 
   let used = st.used || 0;
   let extra = st.extra || 0;
 
-  // сначала тратим включённые секунды (used растёт до лимита), потом extra
   const includedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - used);
   if (includedLeft + extra < seconds) {
     return { ok: false, left: includedLeft + extra, includedLeft, extra };
   }
+
+  let need = seconds;
+  const takeFromIncluded = Math.min(includedLeft, need);
+  used += takeFromIncluded;
+  need -= takeFromIncluded;
+
+  if (need > 0) extra -= need;
+
+  await dbRun(`UPDATE users SET video_sec_month = ?, video_extra_sec = ? WHERE user_id = ?`, [used, extra, userId]);
+
+  const newIncludedLeft = Math.max(0, PREMIUM_VIDEO_SECONDS_INCLUDED - used);
+  return { ok: true, used, extra, left: newIncludedLeft + extra, includedLeft: newIncludedLeft };
+}
 
   let need = seconds;
   const takeFromIncluded = Math.min(includedLeft, need);
@@ -1095,7 +1133,7 @@ async function handleVideoPrompt({ msg, prompt }) {
 
   const seconds = PREMIUM_VIDEO_SECONDS_DEFAULT;
 
-  const rem = getVideoRemaining(userId);
+  const rem = await getVideoRemaining(userId);
   if (rem.totalLeft < seconds) {
     const priceHint =
       VIDEO_PRICE_PER_SEC_XTR > 0
@@ -1110,7 +1148,7 @@ async function handleVideoPrompt({ msg, prompt }) {
   }
 
   // списываем секунды ДО генерации (чтобы не абузили)
-  const lim = consumeVideoSeconds(userId, seconds);
+  const lim = await consumeVideoSeconds(userId, seconds);
   if (!lim.ok) {
     await bot.sendMessage(chatId, "Лимит видео исчерпан.");
     return;
@@ -1138,12 +1176,12 @@ async function handleVideoPrompt({ msg, prompt }) {
   } catch (e) {
     // вернём секунды, если генерация упала
     try {
-      const st = getVideoState(userId);
+      const st = await getVideoState(userId);
       // откат: если в этом месяце used >= seconds, уменьшаем used; иначе возвращаем в extra
       if ((st.used || 0) >= seconds) {
-        db.prepare(`UPDATE users SET video_sec_month = ? WHERE user_id = ?`).run((st.used || 0) - seconds, userId);
+        await dbRun(`UPDATE users SET video_sec_month = ? WHERE user_id = ?`, [(st.used || 0) - seconds, userId]);
       } else {
-        db.prepare(`UPDATE users SET video_extra_sec = ? WHERE user_id = ?`).run((st.extra || 0) + seconds, userId);
+        await dbRun(`UPDATE users SET video_extra_sec = ? WHERE user_id = ?`, [(st.extra || 0) + seconds, userId]);
       }
     } catch {}
 
@@ -1185,9 +1223,10 @@ bot.on("message", async (msg) => {
       if (paidUserId === userId && Number.isFinite(sec) && sec > 0) {
         try {
           getUser(userId);
-          const st = getVideoState(userId);
-          db.prepare(`UPDATE users SET video_extra_sec = ? WHERE user_id = ?`).run((st.extra || 0) + sec, userId);
-          await bot.sendMessage(chatId, `✅ Видео-кредиты добавлены: +${sec} сек. Всего доступно: ${getVideoRemaining(userId).totalLeft} сек.`);
+          const st = await getVideoState(userId);
+          await dbRun(`UPDATE users SET video_extra_sec = ? WHERE user_id = ?`, [(st.extra || 0) + sec, userId]);
+          const rem2 = await getVideoRemaining(userId);
+          await bot.sendMessage(chatId, `✅ Видео-кредиты добавлены: +${sec} сек. Всего доступно: ${rem2.totalLeft} сек.`);
         } catch (e) {
           console.error("video credits add error:", e?.message || e);
           await bot.sendMessage(chatId, "Оплата прошла, но не смог обновить кредиты. Напиши админу.");
