@@ -669,36 +669,35 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
   const premium = isPremium(user);
 
   if (premium) {
-    const until = user.premium_until;
-    await bot.sendMessage(
-    chatId,
-    "⭐ Premium
+    const until = user.premium_until ? formatDateTime(user.premium_until) : "-";
+    const rem = getVideoRemaining(userId);
 
-" +
-      "Что даёт:
-" +
-      "• 🎬 /video — генерация видео (только Premium)
-" +
-      "• 📈 Снятие/увеличение лимитов (голос, изображения и т.п.)
+    const text =
+      `⭐ Premium активен до: ${until}\n\n` +
+      `🎬 Видео: ${rem.totalLeft} сек доступно в этом месяце ` +
+      `(включено осталось: ${rem.includedLeft} сек, докуплено осталось: ${rem.extra} сек)\n\n` +
+      `В Premium включено: ${PREMIUM_VIDEO_SECONDS_INCLUDED} сек видео/месяц (по $${VIDEO_COST_PER_SEC_USD}/сек).\n` +
+      `Докуп секунд: /buy_video <seconds>`;
 
-" +
-      `Включено: ${PREMIUM_VIDEO_SECONDS_INCLUDED} сек видео в месяц (по $${VIDEO_COST_PER_SEC_USD}/сек).
-` +
-      "Докуп секунд: /buy_video <seconds>
-
-" +
-      "Оформить Premium: нажми кнопку оплаты ниже."
-  );
+    await bot.sendMessage(chatId, text);
     return;
   }
 
   const payload = `premium:${userId}:${PREMIUM_DAYS}:${Date.now()}`;
 
+  // Premium = видео + увеличенные лимиты
+  const desc =
+    `Premium на ${PREMIUM_DAYS} дней.\n` +
+    `Что даёт:\n` +
+    `• 🎬 /video — генерация видео (только Premium)\n` +
+    `• 📈 Снятие/увеличение лимитов (голос, изображения и т.п.)\n\n` +
+    `Включено: ${PREMIUM_VIDEO_SECONDS_INCLUDED} сек видео/месяц.`;
+
   try {
     await bot.sendInvoice(
       chatId,
       `Premium на ${PREMIUM_DAYS} дней`,
-      "Доступ к /custom, /voice и видео (/video). Включено: " + PREMIUM_VIDEO_SECONDS_INCLUDED + " сек видео в месяц + увеличенные лимиты.",
+      desc,
       payload,
       "",
       "XTR",
@@ -709,6 +708,7 @@ bot.onText(/^\/premium(@\w+)?$/, async (msg) => {
     await bot.sendMessage(chatId, "Не смог выставить счёт. Проверь, что бот поддерживает оплаты Stars.");
   }
 });
+
 
 
 // /buy_video <seconds>: докупить секунды видео (только Premium)
