@@ -1,3 +1,4 @@
+const awaitingAdminGiveDays = new Map();
 require("dotenv").config();
 
 const { webSearch } = require("./search");
@@ -115,6 +116,50 @@ if (!token) {
 const bot = new TelegramBot(token, { polling: true });
 (async () => {
   try {
+    // ===== ADMIN CALLBACKS =====
+    if (data === "admin_stats") {
+      if (!isAdmin(userId)) {
+        await bot.sendMessage(chatId, "⛔ Нет доступа.");
+        return;
+      }
+      const now = Date.now();
+      const totalRow = await dbGet("SELECT COUNT(*) AS c FROM users", []);
+      const premRow = await dbGet("SELECT COUNT(*) AS c FROM users WHERE premium_until > ? OR is_premium = 1", [now]);
+      let active24 = null;
+      try {
+        const a = await dbGet("SELECT COUNT(*) AS c FROM users WHERE updated_at > ?", [now - 24 * 60 * 60 * 1000]);
+        active24 = a?.c ?? null;
+      } catch {}
+      const txt =
+        "📊 Статистика пользователей\n\n" +
+        `👥 Всего: ${totalRow?.c ?? 0}\n` +
+        `⭐ Premium активен: ${premRow?.c ?? 0}` +
+        (active24 === null ? "" : `\n🕒 Активных за 24ч: ${active24}`);
+      await bot.sendMessage(chatId, txt);
+      return;
+    }
+
+    if (data === "admin_give_30") {
+      if (!isAdmin(userId)) {
+        await bot.sendMessage(chatId, "⛔ Нет доступа.");
+        return;
+      }
+      awaitingAdminGiveDays.set(userId, 30);
+      await bot.sendMessage(chatId, "Отправь userId пользователя (числом), кому выдать Premium на 30 дней.");
+      return;
+    }
+
+    if (data === "admin_take_all") {
+      if (!isAdmin(userId)) {
+        await bot.sendMessage(chatId, "⛔ Нет доступа.");
+        return;
+      }
+      const r = await dbRun("UPDATE users SET is_premium = 0, premium_until = 0 WHERE is_premium = 1 OR premium_until > 0", []);
+      const changes = r?.changes ?? r?.rowCount ?? "OK";
+      await bot.sendMessage(chatId, `✅ Premium забран у всех. Обновлено: ${changes}`);
+      return;
+    }
+
     await bot.deleteWebHook();
     console.log("Webhook deleted (polling mode)");
   } catch (e) {
@@ -261,7 +306,7 @@ ${BASE_SYSTEM}
     title: "👴 Дед-ворчун",
     system: `
 ${BASE_SYSTEM}
-Ты дед Степан. Ворчишь, можешь материться (умеренно), “в мое время…”.
+Ты дед Blinksy. Ворчишь, можешь материться (умеренно), “в мое время…”.
 Иногда мудрый, иногда несёшь чушь, но уверенно.
 `,
   },
@@ -371,7 +416,7 @@ const VOICES = {
 
 // ====== атмосфера при смене маски ======
 const MASK_PHRASES = [
-  "🎭 Степан натянул новую маску…",
+  "🎭 Blinksy натянул новую маску…",
   "🩸 Лицо дрогнуло — и стало другим…",
   "🌑 Из темноты вышла новая личность…",
   "🕯 Теперь я примерю другую роль…",
